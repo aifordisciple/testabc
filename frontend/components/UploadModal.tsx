@@ -1,10 +1,10 @@
 'use client';
 import { useState } from 'react';
 
-// 定义 Props 接口
+// ✅ 关键修复：确保接口定义包含 currentFolderId
 interface UploadModalProps {
   projectId: string;
-  currentFolderId?: string | null; // 👈 新增：支持上传到当前文件夹
+  currentFolderId?: string | null; // 👈 必须加上这行
   onClose: () => void;
   onUploadSuccess: () => void;
 }
@@ -12,37 +12,28 @@ interface UploadModalProps {
 export default function UploadModal({ projectId, currentFolderId, onClose, onUploadSuccess }: UploadModalProps) {
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState(0); // 注意：fetch API 原生不支持上传进度，这里做模拟或暂时移除进度条准确度
+  const [progress, setProgress] = useState(0);
 
   const handleUpload = async () => {
     if (!file) return;
     setUploading(true);
-    setProgress(10); // 假进度：开始
+    setProgress(10);
 
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
 
-      // 1. 构建 FormData (本地直存模式)
       const formData = new FormData();
       formData.append('file', file);
-      // 注意：FastAPI 的 Form 字段名必须与后端 upload_file 参数名一致
-      // 后端: project_id: uuid.UUID
-      // 后端: parent_id: Optional[uuid.UUID] = Form(None)
-      // 但根据我们之前的 files.py 定义，upload_file 是通过 Query Param 还是 Form 接收的？
-      // 让我们回顾一下 files.py:
-      // def upload_file(project_id: uuid.UUID, file: UploadFile, parent_id: Optional[uuid.UUID] = Form(None)...)
-      // project_id 是 query param (FastAPI 默认)，file 和 parent_id 是 Form/File。
       
-      // 所以 URL 应该是: /files/upload?project_id=xxx
-      // Body 是 formData 包含 file 和 parent_id
-      
+      // 如果当前在某个文件夹内，带上 parent_id
       if (currentFolderId) {
         formData.append('parent_id', currentFolderId);
       }
 
-      // 2. 发送请求
-      // 注意：fetch 会自动设置 Content-Type 为 multipart/form-data，不要手动设置 headers['Content-Type']
+      // 这里的 API 路径必须与后端 routes/files.py 定义一致
+      // 后端定义: @router.post("/upload") ... upload_file(project_id: uuid.UUID ...)
+      // 所以是 POST /api/v1/files/upload?project_id=...
       const res = await fetch(`${apiUrl}/files/upload?project_id=${projectId}`, {
         method: 'POST',
         headers: {
@@ -74,7 +65,6 @@ export default function UploadModal({ projectId, currentFolderId, onClose, onUpl
       <div className="bg-gray-900 p-6 rounded-xl border border-gray-700 w-96 shadow-2xl">
         <h3 className="text-xl font-bold text-white mb-4">Upload File</h3>
         
-        {/* 提示当前上传位置 */}
         <div className="mb-4 text-xs text-gray-500">
             Location: {currentFolderId ? 'Inside Folder' : 'Root Directory'}
         </div>
@@ -89,7 +79,7 @@ export default function UploadModal({ projectId, currentFolderId, onClose, onUpl
           <div className="w-full bg-gray-700 rounded-full h-2.5 mt-4 overflow-hidden">
             <div 
                 className="bg-emerald-500 h-2.5 rounded-full animate-pulse" 
-                style={{ width: `${progress === 0 ? 5 : progress}%` }}
+                style={{ width: `${progress}%` }}
             ></div>
           </div>
         )}

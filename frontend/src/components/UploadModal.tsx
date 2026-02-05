@@ -1,14 +1,15 @@
 'use client';
 import { useState } from 'react';
 
+// ✅ 关键修复：确保接口定义包含 currentFolderId
 interface UploadModalProps {
   projectId: string;
-  parentId?: string | null; // 👈 新增：接收父目录 ID
+  currentFolderId?: string | null; // 👈 必须加上这行
   onClose: () => void;
   onUploadSuccess: () => void;
 }
 
-export default function UploadModal({ projectId, parentId, onClose, onUploadSuccess }: UploadModalProps) {
+export default function UploadModal({ projectId, currentFolderId, onClose, onUploadSuccess }: UploadModalProps) {
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -16,89 +17,45 @@ export default function UploadModal({ projectId, parentId, onClose, onUploadSucc
   const handleUpload = async () => {
     if (!file) return;
     setUploading(true);
-    
+    setProgress(10);
+
     try {
       const token = localStorage.getItem('token');
-      if (!token) {
-        alert('登录已失效，请重新登录');
-        setUploading(false);
-        return;
-      }
-
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
 
-      // 1. 获取 Presigned URL
-      const res1 = await fetch(`${apiUrl}/files/upload/presigned?filename=${file.name}&content_type=${file.type}&project_id=${projectId}`, {
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      // 如果当前在某个文件夹内，带上 parent_id
+      if (currentFolderId) {
+        formData.append('parent_id', currentFolderId);
+      }
+
+      // 这里的 API 路径必须与后端 routes/files.py 定义一致
+      // 后端定义: @router.post("/upload") ... upload_file(project_id: uuid.UUID ...)
+      // 所以是 POST /api/v1/files/upload?project_id=...
+      const res = await fetch(`${apiUrl}/files/upload?project_id=${projectId}`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`
-        }
+          'Authorization': `Bearer ${token}`,
+        },
+        body: formData,
       });
+
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || 'Upload failed');
+      }
       
-      if (!res1.ok) throw new Error('获取上传链接失败');
-      const { upload_url, s3_key } = await res1.json();
+      setProgress(100);
+      setUploading(false);
+      onUploadSuccess();
+      alert('上传成功！');
+      onClose();
 
-      // 2. 直传 MinIO (PUT)
-      const xhr = new XMLHttpRequest();
-      xhr.open('PUT', upload_url, true);
-      xhr.setRequestHeader('Content-Type', file.type);
-      
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const percentComplete = (e.loaded / e.total) * 100;
-          setProgress(percentComplete);
-        }
-      };
-
-      xhr.onload = async () => {
-        if (xhr.status === 200) {
-          try {
-            // 3. 通知后端确认 (关键：带上 parent_id)
-            const resConfirm = await fetch(`${apiUrl}/files/upload/confirm`, {
-              method: 'POST',
-              headers: { 
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`
-              },
-              body: JSON.stringify({
-                filename: file.name,
-                size: file.size,
-                content_type: file.type,
-                s3_key: s3_key,
-                project_id: projectId,
-                parent_id: parentId || null // 👈 关键修改：传入父目录ID
-              })
-            });
-
-            if (!resConfirm.ok) {
-              throw new Error('数据库写入失败');
-            }
-
-            setUploading(false);
-            onUploadSuccess();
-            alert('上传成功！');
-            onClose();
-          } catch (err) {
-            console.error(err);
-            alert('文件已入库 MinIO，但数据库记录失败。');
-            setUploading(false);
-          }
-        } else {
-          alert(`上传 MinIO 失败: ${xhr.status}`);
-          setUploading(false);
-        }
-      };
-
-      xhr.onerror = () => {
-        alert('网络错误，上传中断');
-        setUploading(false);
-      };
-
-      xhr.send(file);
-
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      alert('上传流程出错');
+      alert(`上传失败: ${e.message}`);
       setUploading(false);
     }
   };
@@ -106,30 +63,40 @@ export default function UploadModal({ projectId, parentId, onClose, onUploadSucc
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
       <div className="bg-gray-900 p-6 rounded-xl border border-gray-700 w-96 shadow-2xl">
-        <h3 className="text-xl font-bold text-white mb-4">
-           {parentId ? 'Upload to Folder' : 'Upload Data'}
-        </h3>
+        <h3 className="text-xl font-bold text-white mb-4">Upload File</h3>
         
+        <div className="mb-4 text-xs text-gray-500">
+            Location: {currentFolderId ? 'Inside Folder' : 'Root Directory'}
+        </div>
+
         <input 
           type="file" 
           onChange={(e) => setFile(e.target.files?.[0] || null)}
-          className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-900 file:text-blue-300 hover:file:bg-blue-800 cursor-pointer"
+          className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-emerald-900 file:text-emerald-300 hover:file:bg-emerald-800 transition-colors"
         />
 
         {uploading && (
-          <div className="w-full bg-gray-700 rounded-full h-2.5 mt-4">
-            <div className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
+          <div className="w-full bg-gray-700 rounded-full h-2.5 mt-4 overflow-hidden">
+            <div 
+                className="bg-emerald-500 h-2.5 rounded-full animate-pulse" 
+                style={{ width: `${progress}%` }}
+            ></div>
           </div>
         )}
 
         <div className="flex justify-end gap-3 mt-6">
-          <button onClick={onClose} className="text-gray-400 hover:text-white transition-colors">Cancel</button>
+          <button 
+            onClick={onClose} 
+            className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors"
+          >
+            Cancel
+          </button>
           <button 
             onClick={handleUpload} 
             disabled={!file || uploading}
-            className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg disabled:opacity-50 transition-colors font-medium"
+            className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors"
           >
-            {uploading ? 'Uploading...' : 'Start Upload'}
+            {uploading ? 'Uploading...' : 'Upload'}
           </button>
         </div>
       </div>

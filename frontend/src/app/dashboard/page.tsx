@@ -263,10 +263,9 @@ export default function Dashboard() {
 
       {/* 弹窗区域 */}
       {showUpload && activeProjectId && (
-        <UploadModal 
-          projectId={activeProjectId} 
-          // Dashboard 上的快捷上传默认传到根目录，所以 parentId 不传或传 null
-          parentId={null}
+        <UploadModal
+          projectId={activeProjectId}
+          currentFolderId={null} // ✅ 修正：改为 currentFolderId
           onClose={() => setShowUpload(false)}
           onUploadSuccess={handleUploadSuccess}
         />

@@ -1,12 +1,10 @@
 'use client';
 import { useState } from 'react';
 
-// 1. 定义 Props 接口
 interface FileUploaderProps {
   projectId: string;
 }
 
-// 2. 在函数参数中使用该接口
 export default function FileUploader({ projectId }: FileUploaderProps) {
   const [uploading, setUploading] = useState(false);
 
@@ -17,35 +15,23 @@ export default function FileUploader({ projectId }: FileUploaderProps) {
     setUploading(true);
 
     try {
-      // 1. 向后端请求预签名 URL
-      const res = await fetch('/api/upload/presigned', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            filename: file.name, 
-            project_id: projectId,
-            content_type: file.type 
-        }),
-      });
-      const { upload_url, s3_key } = await res.json();
+      const token = localStorage.getItem('token');
+      
+      // === 核心修改：改为 FormData 直接上传 ===
+      const formData = new FormData();
+      formData.append('file', file);
 
-      // 2. 直接向 MinIO 上传文件 (PUT)
-      await fetch(upload_url, {
-        method: 'PUT',
-        body: file,
-        headers: { 'Content-Type': file.type }
+      const res = await fetch(`/api/files/upload?project_id=${projectId}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+        body: formData,
       });
 
-      // 3. 通知后端上传完成，写入数据库
-      await fetch('/api/upload/confirm', {
-        method: 'POST',
-        body: JSON.stringify({
-            filename: file.name,
-            s3_key: s3_key,
-            size: file.size,
-            project_id: projectId
-        })
-      });
+      if (!res.ok) {
+        throw new Error('Upload failed');
+      }
 
       alert('上传成功！');
     } catch (error) {
@@ -57,9 +43,14 @@ export default function FileUploader({ projectId }: FileUploaderProps) {
   };
 
   return (
-    <div className="p-4 border border-dashed rounded-lg">
-      <input type="file" onChange={handleFileChange} disabled={uploading} />
-      {uploading && <p>正在极速上传中...</p>}
+    <div className="p-4 border border-dashed rounded-lg border-gray-700 bg-gray-800">
+      <input 
+        type="file" 
+        onChange={handleFileChange} 
+        disabled={uploading}
+        className="text-gray-300" 
+      />
+      {uploading && <p className="text-emerald-400 text-sm mt-2">正在上传中...</p>}
     </div>
   );
 }
