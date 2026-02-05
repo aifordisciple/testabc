@@ -1,10 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation'; // 引入路由，用于未登录跳转
+import { useRouter } from 'next/navigation';
 import UploadModal from '@/components/UploadModal';
+import CreateProjectModal from '@/components/CreateProjectModal'; // 👈 引入新组件
 
-// 定义前端展示用的项目接口
 interface Project {
   id: string;
   name: string;
@@ -14,22 +14,26 @@ interface Project {
 }
 
 export default function Dashboard() {
-  const router = useRouter(); // 路由钩子
-  const [showUpload, setShowUpload] = useState(false);
+  const router = useRouter();
+  
+  // === 状态管理 ===
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
+  
+  // 弹窗状态
+  const [showUpload, setShowUpload] = useState(false);
+  const [showCreate, setShowCreate] = useState(false); // 👈 新增：新建项目弹窗状态
 
-  // === 核心逻辑：从后端获取项目列表 (带 Token) ===
+  // === 获取项目列表 ===
   const fetchProjects = async () => {
     try {
-      setIsLoading(true);
+      // 保持 isLoading 为 true 稍微短一点，或者在重新获取时不显示全屏 loading，体验更好
+      // 这里为了简单，还是设为 true
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-      const token = localStorage.getItem('token'); // 👇 获取 Token
+      const token = localStorage.getItem('token');
 
-      // 如果没 Token，直接踢回登录页
       if (!token) {
-        alert('请先登录');
         router.push('/');
         return;
       }
@@ -38,13 +42,12 @@ export default function Dashboard() {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}` // 👈 关键：带上 Token 身份证
+          'Authorization': `Bearer ${token}`
         }
       });
       
       if (res.ok) {
         const data = await res.json();
-        
         const mappedProjects = data.map((p: any) => ({
           id: p.id,
           name: p.name,
@@ -55,16 +58,13 @@ export default function Dashboard() {
         
         setProjects(mappedProjects);
         
+        // 如果当前没有选中的项目，且列表不为空，默认选中第一个
         if (mappedProjects.length > 0 && !activeProjectId) {
           setActiveProjectId(mappedProjects[0].id);
         }
       } else if (res.status === 401) {
-        // Token 过期或无效
-        alert('登录已过期，请重新登录');
         localStorage.removeItem('token');
         router.push('/');
-      } else {
-        console.error("获取项目失败:", res.statusText);
       }
     } catch (error) {
       console.error("无法连接到服务器", error);
@@ -77,8 +77,15 @@ export default function Dashboard() {
     fetchProjects();
   }, []);
 
+  // === 回调函数 ===
   const handleUploadSuccess = () => {
-    console.log('文件上传成功！');
+    console.log('文件上传成功');
+    // 如果后续要在项目卡片显示文件数，这里可以重新 fetchProjects
+  };
+
+  const handleCreateSuccess = () => {
+    // 创建成功后，重新拉取列表，这样新项目就会立刻显示出来
+    fetchProjects();
   };
 
   return (
@@ -98,13 +105,15 @@ export default function Dashboard() {
               <span className="text-xs text-gray-500 font-mono hidden sm:block">
                 Region: AWS-US-East
               </span>
+              
+              {/* 👇 修改：点击触发新建弹窗 */}
               <button 
-                onClick={() => alert('请在 Swagger 创建项目 (记得点右上角 Authorize 锁头输入 Token)')}
-                className="bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-md text-sm border border-gray-700 transition-colors"
+                onClick={() => setShowCreate(true)}
+                className="bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-md text-sm border border-gray-700 transition-colors flex items-center gap-2"
               >
-                + New Project
+                <span>+</span> New Project
               </button>
-              {/* 退出登录按钮 */}
+              
               <button 
                 onClick={() => {
                    localStorage.removeItem('token');
@@ -135,15 +144,20 @@ export default function Dashboard() {
           
           {isLoading ? (
             <div className="text-center py-20 text-gray-500 animate-pulse">
-              正在加载您的专属项目...
+              加载中...
             </div>
           ) : projects.length === 0 ? (
-            <div className="text-center py-20 border-2 border-dashed border-gray-800 rounded-xl">
-              <p className="text-gray-400 mb-4">暂无项目</p>
-              <p className="text-sm text-gray-600">
-                请先在 Swagger UI 创建项目<br/>
-                (注意：现在 API 需要 Token 验证了)
+            <div className="text-center py-20 border-2 border-dashed border-gray-800 rounded-xl bg-gray-900/20">
+              <p className="text-gray-400 mb-4 font-medium">暂无项目</p>
+              <p className="text-sm text-gray-600 mb-6">
+                您还没有创建任何科研项目。
               </p>
+              <button 
+                onClick={() => setShowCreate(true)}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+              >
+                Create Your First Project
+              </button>
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -215,12 +229,20 @@ export default function Dashboard() {
         </div>
       </main>
 
-      {/* 上传弹窗 */}
+      {/* 弹窗区域 */}
       {showUpload && activeProjectId && (
         <UploadModal 
           projectId={activeProjectId} 
           onClose={() => setShowUpload(false)}
           onUploadSuccess={handleUploadSuccess}
+        />
+      )}
+
+      {/* 👇 新增：新建项目弹窗 */}
+      {showCreate && (
+        <CreateProjectModal 
+          onClose={() => setShowCreate(false)}
+          onSuccess={handleCreateSuccess}
         />
       )}
     </div>
