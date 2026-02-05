@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select, SQLModel  # <--- 已修复：导入 SQLModel
 from typing import List, Optional
 import uuid
+from sqlalchemy import func # 👈 新增这一行！用于聚合查询
 
 from app.core.db import get_session
 from app.services.s3 import s3_service
@@ -100,37 +101,67 @@ def create_folder(
 @router.get("/projects/{project_id}/files")
 def list_project_files(
     project_id: uuid.UUID,
-    folder_id: Optional[uuid.UUID] = None, # 支持目录浏览
+    folder_id: Optional[uuid.UUID] = None, 
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
-    """列出指定项目下的文件（支持层级）"""
-    # 1. 验证项目权限
+    """
+    列出指定项目下的文件。
+    - 根目录模式：只显示显式关联到项目的文件/文件夹。
+    - 子目录模式：如果文件夹已关联，则显示其下所有内容（动态共享）。
+    """
+    # 1. 验证项目基础权限
     project = session.get(Project, project_id)
     if not project or project.owner_id != current_user.id:
         raise HTTPException(status_code=404, detail="Project not found")
     
-    # 2. 查询当前层级的文件 (利用 Join 查询 ProjectFileLink)
-    statement = (
-        select(File)
-        .join(ProjectFileLink, File.id == ProjectFileLink.file_id)
-        .where(ProjectFileLink.project_id == project_id)
-        .where(File.parent_id == folder_id) # 只查当前 parent_id
-        .order_by(File.is_directory.desc(), File.uploaded_at.desc())
-    )
-    files = session.exec(statement).all()
-
-    # 3. 计算面包屑导航 (用于前端展示路径)
     breadcrumbs = []
-    current = folder_id
-    while current:
-        f = session.get(File, current)
-        if f:
-            breadcrumbs.insert(0, {"id": f.id, "name": f.filename})
-            current = f.parent_id
-        else:
-            break
+    
+    if folder_id:
+        # === 进入文件夹模式 ===
+        
+        # A. 核心检查：这个文件夹本身是否属于该项目？
+        # (这是安全关键点：防止用户通过 URL 遍历访问未授权的文件夹)
+        folder_link = session.exec(
+            select(ProjectFileLink)
+            .where(ProjectFileLink.project_id == project_id)
+            .where(ProjectFileLink.file_id == folder_id)
+        ).first()
+        
+        if not folder_link:
+             raise HTTPException(status_code=404, detail="Folder not linked to this project")
+             
+        # B. 查询内容：既然持有文件夹，就隐式持有其内容
+        # 直接查 File 表，不再需要 Join ProjectFileLink
+        statement = (
+            select(File)
+            .where(File.parent_id == folder_id)
+            .order_by(File.is_directory.desc(), File.uploaded_at.desc())
+        )
+        
+        # C. 构建面包屑 (向上递归查找路径)
+        current = folder_id
+        while current:
+            f = session.get(File, current)
+            if f:
+                breadcrumbs.insert(0, {"id": f.id, "name": f.filename})
+                current = f.parent_id
+            else:
+                break
+                
+    else:
+        # === 根目录模式 ===
+        
+        # 必须严格 Join 关联表，只显示显式共享到根目录的项
+        statement = (
+            select(File)
+            .join(ProjectFileLink, File.id == ProjectFileLink.file_id)
+            .where(ProjectFileLink.project_id == project_id)
+            .where(File.parent_id == None) # 只看根目录
+            .order_by(File.is_directory.desc(), File.uploaded_at.desc())
+        )
 
+    files = session.exec(statement).all()
     return {"files": files, "breadcrumbs": breadcrumbs}
 
 @router.post("/upload/presigned")
@@ -206,6 +237,33 @@ def get_download_url(
     # 生成 GET 链接
     url = s3_service.generate_presigned_url(file_record.s3_key, file_record.content_type, method='get_object')
     return {"download_url": url}
+
+# ... 放在 File API 区域 ...
+
+@router.get("/usage")
+def get_storage_usage(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """获取当前用户的存储空间使用情况"""
+    
+    # 1. 计算总使用量 (聚合查询)
+    # select sum(size) from file where uploader_id = current_user.id
+    statement = select(func.sum(File.size)).where(File.uploader_id == current_user.id)
+    total_bytes = session.exec(statement).first()
+    
+    # 如果没有文件，total_bytes 会是 None，转为 0
+    used = total_bytes if total_bytes else 0
+    
+    # 2. 设定配额 (MVP阶段先硬编码，比如 10GB)
+    # 未来可以做到 User 表里，给 VIP 用户更多空间
+    limit = 10 * 1024 * 1024 * 1024 # 10 GB
+    
+    return {
+        "used_bytes": used, 
+        "limit_bytes": limit,
+        "percentage": round((used / limit) * 100, 2)
+    }
 
 # =======================
 # File Operations (操作)

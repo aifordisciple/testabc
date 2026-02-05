@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import UploadModal from '@/components/UploadModal';
-import CreateProjectModal from '@/components/CreateProjectModal'; // 👈 引入新组件
+import CreateProjectModal from '@/components/CreateProjectModal';
 
 interface Project {
   id: string;
@@ -11,6 +11,13 @@ interface Project {
   status: string;
   date: string;
   description?: string;
+}
+
+// 👈 新增：用量数据接口
+interface UsageData {
+  used_bytes: number;
+  limit_bytes: number;
+  percentage: number;
 }
 
 export default function Dashboard() {
@@ -21,15 +28,25 @@ export default function Dashboard() {
   const [activeProjectId, setActiveProjectId] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
   
+  // 👈 新增：用量状态
+  const [usage, setUsage] = useState<UsageData>({ used_bytes: 0, limit_bytes: 1, percentage: 0 });
+  
   // 弹窗状态
   const [showUpload, setShowUpload] = useState(false);
-  const [showCreate, setShowCreate] = useState(false); // 👈 新增：新建项目弹窗状态
+  const [showCreate, setShowCreate] = useState(false);
 
-  // === 获取项目列表 ===
-  const fetchProjects = async () => {
+  // === 工具函数：格式化字节 ===
+  const formatSize = (bytes: number) => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  // === 获取数据 ===
+  const fetchData = async () => {
     try {
-      // 保持 isLoading 为 true 稍微短一点，或者在重新获取时不显示全屏 loading，体验更好
-      // 这里为了简单，还是设为 true
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
       const token = localStorage.getItem('token');
 
@@ -38,16 +55,20 @@ export default function Dashboard() {
         return;
       }
       
-      const res = await fetch(`${apiUrl}/files/projects`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        }
-      });
+      const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      };
+
+      // 1. 并行请求：获取项目列表 + 获取存储用量
+      const [resProjects, resUsage] = await Promise.all([
+        fetch(`${apiUrl}/files/projects`, { method: 'GET', headers }),
+        fetch(`${apiUrl}/files/usage`, { method: 'GET', headers })
+      ]);
       
-      if (res.ok) {
-        const data = await res.json();
+      // 处理项目列表
+      if (resProjects.ok) {
+        const data = await resProjects.json();
         const mappedProjects = data.map((p: any) => ({
           id: p.id,
           name: p.name,
@@ -55,17 +76,20 @@ export default function Dashboard() {
           date: new Date(p.created_at).toLocaleDateString(),
           description: p.description
         }));
-        
         setProjects(mappedProjects);
-        
-        // 如果当前没有选中的项目，且列表不为空，默认选中第一个
         if (mappedProjects.length > 0 && !activeProjectId) {
           setActiveProjectId(mappedProjects[0].id);
         }
-      } else if (res.status === 401) {
+      } else if (resProjects.status === 401) {
         localStorage.removeItem('token');
         router.push('/');
       }
+
+      // 👈 处理用量数据
+      if (resUsage.ok) {
+        setUsage(await resUsage.json());
+      }
+
     } catch (error) {
       console.error("无法连接到服务器", error);
     } finally {
@@ -74,18 +98,16 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
-    fetchProjects();
+    fetchData();
   }, []);
 
   // === 回调函数 ===
   const handleUploadSuccess = () => {
-    console.log('文件上传成功');
-    // 如果后续要在项目卡片显示文件数，这里可以重新 fetchProjects
+    fetchData(); // 上传后刷新，不仅为了新文件，也为了更新空间使用量
   };
 
   const handleCreateSuccess = () => {
-    // 创建成功后，重新拉取列表，这样新项目就会立刻显示出来
-    fetchProjects();
+    fetchData();
   };
 
   return (
@@ -94,6 +116,7 @@ export default function Dashboard() {
       <nav className="border-b border-gray-800 bg-gray-900/50 backdrop-blur-md sticky top-0 z-10">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="flex h-16 justify-between items-center">
+            {/* Logo */}
             <div className="flex items-center gap-3">
               <div className="h-8 w-8 bg-gradient-to-tr from-blue-500 to-emerald-500 rounded-lg shadow-[0_0_15px_rgba(59,130,246,0.5)]"></div>
               <span className="font-bold text-xl tracking-tight bg-gradient-to-r from-white to-gray-400 text-transparent bg-clip-text">
@@ -101,12 +124,33 @@ export default function Dashboard() {
               </span>
             </div>
             
-            <div className="flex items-center gap-4">
-              <span className="text-xs text-gray-500 font-mono hidden sm:block">
-                Region: AWS-US-East
-              </span>
+            {/* 右侧工具栏 */}
+            <div className="flex items-center gap-6">
               
-              {/* 👇 修改：点击触发新建弹窗 */}
+              {/* 👈 新增：存储空间展示 Widget */}
+              <div className="hidden md:block w-48 group">
+                <div className="flex justify-between text-xs text-gray-400 mb-1.5">
+                  <span className="font-medium text-gray-300">Storage</span>
+                  <span>{usage.percentage}%</span>
+                </div>
+                <div className="h-2 w-full bg-gray-800 rounded-full overflow-hidden border border-gray-700/50">
+                  <div 
+                    className={`h-full rounded-full transition-all duration-1000 ease-out ${
+                      usage.percentage > 90 ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]' : 
+                      usage.percentage > 70 ? 'bg-yellow-500' : 
+                      'bg-gradient-to-r from-blue-500 to-emerald-400'
+                    }`}
+                    style={{ width: `${usage.percentage}%` }}
+                  ></div>
+                </div>
+                <div className="text-[10px] text-gray-500 text-right mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {formatSize(usage.used_bytes)} / {formatSize(usage.limit_bytes)}
+                </div>
+              </div>
+
+              <div className="h-6 w-px bg-gray-800 mx-2 hidden md:block"></div>
+
+              {/* 按钮组 */}
               <button 
                 onClick={() => setShowCreate(true)}
                 className="bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-md text-sm border border-gray-700 transition-colors flex items-center gap-2"
@@ -119,7 +163,7 @@ export default function Dashboard() {
                    localStorage.removeItem('token');
                    router.push('/');
                 }}
-                className="text-xs text-red-400 hover:text-red-300 border border-red-900 bg-red-900/20 px-3 py-1.5 rounded-md"
+                className="text-xs text-red-400 hover:text-red-300 border border-red-900/50 bg-red-900/10 px-3 py-1.5 rounded-md hover:bg-red-900/20 transition-colors"
               >
                 Sign Out
               </button>
@@ -144,14 +188,11 @@ export default function Dashboard() {
           
           {isLoading ? (
             <div className="text-center py-20 text-gray-500 animate-pulse">
-              加载中...
+              正在加载实验室数据...
             </div>
           ) : projects.length === 0 ? (
             <div className="text-center py-20 border-2 border-dashed border-gray-800 rounded-xl bg-gray-900/20">
               <p className="text-gray-400 mb-4 font-medium">暂无项目</p>
-              <p className="text-sm text-gray-600 mb-6">
-                您还没有创建任何科研项目。
-              </p>
               <button 
                 onClick={() => setShowCreate(true)}
                 className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
@@ -187,11 +228,9 @@ export default function Dashboard() {
                 <div 
                   key={project.id} 
                   onClick={() => router.push(`/dashboard/project/${project.id}`)}
-                  className={`bg-gray-900 border overflow-hidden rounded-xl hover:shadow-[0_8px_30px_rgb(0,0,0,0.12)] transition-all flex flex-col ${
-                    activeProjectId === project.id ? 'border-blue-500/50 shadow-[0_0_15px_rgba(59,130,246,0.2)]' : 'border-gray-800 hover:border-gray-700'
-                  }`}
+                  className="bg-gray-900 border border-gray-800 overflow-hidden rounded-xl hover:shadow-[0_8px_30px_rgb(0,0,0,0.12)] hover:border-gray-700 transition-all flex flex-col cursor-pointer group"
                 >
-                  <div className="px-6 py-5 sm:p-6 flex-1 cursor-pointer">
+                  <div className="px-6 py-5 sm:p-6 flex-1">
                     <div className="flex items-center justify-between mb-4">
                       <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border bg-emerald-950/30 text-emerald-400 border-emerald-900">
                         <span className="w-1.5 h-1.5 rounded-full mr-1.5 bg-emerald-400"></span>
@@ -199,7 +238,7 @@ export default function Dashboard() {
                       </span>
                       <span className="text-xs text-gray-500 font-mono">{project.date}</span>
                     </div>
-                    <h3 className="text-base font-semibold leading-6 text-white group-hover:text-blue-400">
+                    <h3 className="text-base font-semibold leading-6 text-white group-hover:text-blue-400 transition-colors">
                       {project.name}
                     </h3>
                     <p className="mt-2 text-sm text-gray-400 line-clamp-2">
@@ -211,16 +250,9 @@ export default function Dashboard() {
                     <span className="text-xs text-gray-500 font-mono">
                       ID: {project.id.slice(0, 8)}...
                     </span>
-                    <button 
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setActiveProjectId(project.id);
-                        setShowUpload(true);
-                      }}
-                      className="text-sm font-medium text-blue-400 hover:text-blue-300 transition-colors"
-                    >
-                      Upload &rarr;
-                    </button>
+                    <span className="text-xs text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                       View Project &rarr;
+                    </span>
                   </div>
                 </div>
               ))}
@@ -233,12 +265,13 @@ export default function Dashboard() {
       {showUpload && activeProjectId && (
         <UploadModal 
           projectId={activeProjectId} 
+          // Dashboard 上的快捷上传默认传到根目录，所以 parentId 不传或传 null
+          parentId={null}
           onClose={() => setShowUpload(false)}
           onUploadSuccess={handleUploadSuccess}
         />
       )}
 
-      {/* 👇 新增：新建项目弹窗 */}
       {showCreate && (
         <CreateProjectModal 
           onClose={() => setShowCreate(false)}
