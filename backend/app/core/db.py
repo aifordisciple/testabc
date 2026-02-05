@@ -1,8 +1,11 @@
 from sqlmodel import SQLModel, create_engine, Session
 from app.core.config import settings
 
+# ⚠️ 必须导入定义了模型的模块，否则 SQLModel.metadata.create_all 不会创建表
+# 也不要导入已删除的 bio 模块
+from app.models import user 
+
 # 创建数据库引擎
-# echo=True 会在控制台打印 SQL 语句，方便调试
 engine = create_engine(settings.SQLALCHEMY_DATABASE_URI, echo=True)
 
 def init_db():
@@ -14,7 +17,6 @@ def init_db():
 def get_session():
     """
     Dependency (依赖注入) 函数
-    为每个请求创建一个独立的数据库会话，请求结束后自动关闭。
     """
     with Session(engine) as session:
         yield session

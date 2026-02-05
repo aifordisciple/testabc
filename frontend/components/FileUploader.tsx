@@ -1,7 +1,13 @@
 'use client';
 import { useState } from 'react';
 
-export default function FileUploader({ projectId }) {
+// 1. 定义 Props 接口
+interface FileUploaderProps {
+  projectId: string;
+}
+
+// 2. 在函数参数中使用该接口
+export default function FileUploader({ projectId }: FileUploaderProps) {
   const [uploading, setUploading] = useState(false);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -24,7 +30,6 @@ export default function FileUploader({ projectId }) {
       const { upload_url, s3_key } = await res.json();
 
       // 2. 直接向 MinIO 上传文件 (PUT)
-      // 注意：这里是直接传给 MinIO，速度极快，不消耗后端资源
       await fetch(upload_url, {
         method: 'PUT',
         body: file,

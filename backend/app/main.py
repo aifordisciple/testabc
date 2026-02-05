@@ -4,19 +4,17 @@ from contextlib import asynccontextmanager
 
 from app.core.config import settings
 from app.core.db import init_db
-from app.api.routes import auth
-
-from app.api.routes import auth, files  # <--- 导入 files
+from app.api.routes import auth, files, workflow # 👈 1. 导入 workflow
 
 # === 生命周期管理 ===
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    应用启动时执行：初始化数据库表结构
-    应用关闭时执行：(暂无)
-    """
     print("🚀 Autonome System Starting...")
-    init_db()
+    try:
+        init_db()
+        print("✅ Database initialized successfully.")
+    except Exception as e:
+        print(f"❌ Database initialization failed: {e}")
     yield
     print("🛑 Autonome System Shutting Down...")
 
@@ -27,20 +25,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# === CORS 配置 (允许前端访问) ===
-# 允许 localhost:3000 (Next.js) 跨域请求
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-	"http://localhost:3001",    # <--- 新增这一行
-    "http://127.0.0.1:3001",    # <--- 新增这一行 (保险起见)
-    "http://113.44.66.210:3001",    # <--- 新增这一行 (保险起见)
-]
-
+# === CORS 配置 (万能模式) ===
 app.add_middleware(
     CORSMiddleware,
-    # allow_origins=origins,
-    allow_origins=origins,
+    allow_origin_regex=".*", 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,7 +36,9 @@ app.add_middleware(
 
 # === 注册路由 ===
 app.include_router(auth.router, prefix=f"{settings.API_V1_STR}/auth", tags=["Authentication"])
-app.include_router(files.router, prefix=f"{settings.API_V1_STR}/files", tags=["Files"]) # <--- 注册
+app.include_router(files.router, prefix=f"{settings.API_V1_STR}/files", tags=["Files"])
+# 👇 2. 注册 Workflow 路由
+app.include_router(workflow.router, prefix=f"{settings.API_V1_STR}/workflow", tags=["Workflow"])
 
 @app.get("/")
 def root():
