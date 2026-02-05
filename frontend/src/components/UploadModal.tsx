@@ -1,7 +1,14 @@
 'use client';
 import { useState } from 'react';
 
-export default function UploadModal({ projectId, onClose, onUploadSuccess }: any) {
+interface UploadModalProps {
+  projectId: string;
+  parentId?: string | null; // 👈 新增：接收父目录 ID
+  onClose: () => void;
+  onUploadSuccess: () => void;
+}
+
+export default function UploadModal({ projectId, parentId, onClose, onUploadSuccess }: UploadModalProps) {
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -12,12 +19,23 @@ export default function UploadModal({ projectId, onClose, onUploadSuccess }: any
     
     try {
       const token = localStorage.getItem('token');
+      if (!token) {
+        alert('登录已失效，请重新登录');
+        setUploading(false);
+        return;
+      }
+
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
 
       // 1. 获取 Presigned URL
       const res1 = await fetch(`${apiUrl}/files/upload/presigned?filename=${file.name}&content_type=${file.type}&project_id=${projectId}`, {
         method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
       });
+      
+      if (!res1.ok) throw new Error('获取上传链接失败');
       const { upload_url, s3_key } = await res1.json();
 
       // 2. 直传 MinIO (PUT)
@@ -34,26 +52,46 @@ export default function UploadModal({ projectId, onClose, onUploadSuccess }: any
 
       xhr.onload = async () => {
         if (xhr.status === 200) {
-          // 3. 通知后端确认
-          await fetch(`${apiUrl}/files/upload/confirm`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              filename: file.name,
-              size: file.size,
-              content_type: file.type,
-              s3_key: s3_key,
-              project_id: projectId
-            })
-          });
-          setUploading(false);
-          onUploadSuccess();
-          alert('上传成功！');
-          onClose();
+          try {
+            // 3. 通知后端确认 (关键：带上 parent_id)
+            const resConfirm = await fetch(`${apiUrl}/files/upload/confirm`, {
+              method: 'POST',
+              headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+              },
+              body: JSON.stringify({
+                filename: file.name,
+                size: file.size,
+                content_type: file.type,
+                s3_key: s3_key,
+                project_id: projectId,
+                parent_id: parentId || null // 👈 关键修改：传入父目录ID
+              })
+            });
+
+            if (!resConfirm.ok) {
+              throw new Error('数据库写入失败');
+            }
+
+            setUploading(false);
+            onUploadSuccess();
+            alert('上传成功！');
+            onClose();
+          } catch (err) {
+            console.error(err);
+            alert('文件已入库 MinIO，但数据库记录失败。');
+            setUploading(false);
+          }
         } else {
-          alert('上传 MinIO 失败');
+          alert(`上传 MinIO 失败: ${xhr.status}`);
           setUploading(false);
         }
+      };
+
+      xhr.onerror = () => {
+        alert('网络错误，上传中断');
+        setUploading(false);
       };
 
       xhr.send(file);
@@ -68,7 +106,9 @@ export default function UploadModal({ projectId, onClose, onUploadSuccess }: any
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
       <div className="bg-gray-900 p-6 rounded-xl border border-gray-700 w-96 shadow-2xl">
-        <h3 className="text-xl font-bold text-white mb-4">Upload Data</h3>
+        <h3 className="text-xl font-bold text-white mb-4">
+           {parentId ? 'Upload to Folder' : 'Upload Data'}
+        </h3>
         
         <input 
           type="file" 

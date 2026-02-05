@@ -30,18 +30,19 @@ class S3Service:
         
         self.bucket = settings.MINIO_BUCKET_NAME
 
-    def generate_presigned_url(self, object_name: str, content_type: str) -> str:
-        """生成上传用的临时 URL"""
+    # 修改 generate_presigned_url 方法签名和内部逻辑
+    def generate_presigned_url(self, object_name: str, content_type: str, method: str = 'put_object') -> str:
         try:
-            # 使用 public_client 生成签名
-            # 这样生成的签名就是基于 http://113.44.66.210:9000 计算的，完全合法
+            params = {
+                'Bucket': self.bucket,
+                'Key': object_name,
+            }
+            if method == 'put_object':
+                params['ContentType'] = content_type
+            
             url = self.public_client.generate_presigned_url(
-                'put_object',
-                Params={
-                    'Bucket': self.bucket,
-                    'Key': object_name,
-                    'ContentType': content_type
-                },
+                ClientMethod=method, # 使用传入的方法
+                Params=params,
                 ExpiresIn=3600
             )
             
@@ -50,5 +51,14 @@ class S3Service:
         except Exception as e:
             print(f"S3 Error: {e}")
             return None
+
+    # 在 S3Service 类中增加
+    def delete_file(self, s3_key: str):
+        try:
+            self.internal_client.delete_object(Bucket=self.bucket, Key=s3_key)
+            return True
+        except Exception as e:
+            print(f"S3 Delete Error: {e}")
+            return False
 
 s3_service = S3Service()

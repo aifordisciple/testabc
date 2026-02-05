@@ -186,7 +186,7 @@ export default function Dashboard() {
               {projects.map((project) => (
                 <div 
                   key={project.id} 
-                  onClick={() => setActiveProjectId(project.id)}
+                  onClick={() => router.push(`/dashboard/project/${project.id}`)}
                   className={`bg-gray-900 border overflow-hidden rounded-xl hover:shadow-[0_8px_30px_rgb(0,0,0,0.12)] transition-all flex flex-col ${
                     activeProjectId === project.id ? 'border-blue-500/50 shadow-[0_0_15px_rgba(59,130,246,0.2)]' : 'border-gray-800 hover:border-gray-700'
                   }`}
