@@ -4,9 +4,12 @@ import { useState, useEffect, use } from 'react';
 import { useRouter } from 'next/navigation';
 import UploadModal from '@/components/UploadModal';
 import SampleManager from '@/components/SampleManager';
-import AnalysisManager from '@/components/AnalysisManager'; // 👈 引入 AnalysisManager
+import AnalysisManager from '@/components/AnalysisManager';
+import ConfirmModal from '@/components/ConfirmModal'; // 👈
+import InputModal from '@/components/InputModal';     // 👈
+import toast from 'react-hot-toast';
 
-// === 类型定义 ===
+// ... 保持类型定义和 LinkProjectModal 不变 ...
 interface FileData {
   id: string;
   filename: string;
@@ -27,7 +30,7 @@ interface Breadcrumb {
   name: string;
 }
 
-// === 子组件：关联项目弹窗 ===
+// (为了篇幅，LinkProjectModal 代码略，请保持原样，不要删除)
 function LinkProjectModal({ fileId, currentProjectId, onClose, onSuccess }: any) {
   const [projects, setProjects] = useState<ProjectDetail[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState('');
@@ -36,11 +39,12 @@ function LinkProjectModal({ fileId, currentProjectId, onClose, onSuccess }: any)
   useEffect(() => {
     const fetchProjects = async () => {
       const token = localStorage.getItem('token');
-      // ✅ 修复：添加默认值防止 TS 报错
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-      const res = await fetch(`${apiUrl}/projects`, { 
+      
+      const res = await fetch(`${apiUrl}/files/projects`, { 
         headers: { Authorization: `Bearer ${token}` }
       });
+      
       if (res.ok) {
         const data = await res.json();
         const others = data.filter((p: any) => p.id !== currentProjectId);
@@ -52,8 +56,9 @@ function LinkProjectModal({ fileId, currentProjectId, onClose, onSuccess }: any)
   }, [currentProjectId]);
 
   const handleSubmit = async () => {
-    if (!selectedProjectId) return alert('请选择一个项目');
+    if (!selectedProjectId) return toast.error('Please select a project');
     setLoading(true);
+    const loadingToast = toast.loading("Linking...");
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
@@ -68,22 +73,25 @@ function LinkProjectModal({ fileId, currentProjectId, onClose, onSuccess }: any)
       });
 
       if (res.ok) {
-        alert('关联成功！');
+        toast.success('Linked successfully!', { id: loadingToast });
         onSuccess();
         onClose();
       } else {
         const err = await res.json();
-        alert(err.status === 'already_linked' ? '该文件已关联' : `关联失败: ${err.detail}`);
+        const msg = err.status === 'already_linked' ? 'Already linked' : `Failed: ${err.detail}`;
+        toast.error(msg, { id: loadingToast });
       }
-    } catch (e) { alert('网络错误'); } finally { setLoading(false); }
+    } catch (e) { 
+        toast.error('Network error', { id: loadingToast });
+    } finally { setLoading(false); }
   };
 
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
       <div className="bg-gray-900 p-6 rounded-xl border border-gray-700 w-96 shadow-2xl">
-        <h3 className="text-xl font-bold text-white mb-4">Add to another Project</h3>
+        <h3 className="text-xl font-bold text-white mb-4">Share to another Project</h3>
         {projects.length === 0 ? (
-          <div className="text-yellow-500 text-sm mb-4">无其他项目可选。</div>
+          <div className="text-yellow-500 text-sm mb-4">No other projects available.</div>
         ) : (
           <select 
             className="w-full bg-gray-800 border border-gray-700 rounded-md p-2 text-white mb-6 outline-none"
@@ -109,13 +117,11 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const { id: projectId } = use(params);
   const router = useRouter();
   
-  // 状态管理
   const [project, setProject] = useState<ProjectDetail | null>(null);
   
-  // Tab 状态: 'files' | 'workflow'
-  const [activeTab, setActiveTab] = useState<'files' | 'workflow'>('files');
+  // 👇 1. Tab 增加 'samples' 和 'workflow'
+  const [activeTab, setActiveTab] = useState<'files' | 'samples' | 'workflow'>('files');
 
-  // File View States
   const [files, setFiles] = useState<FileData[]>([]);
   const [breadcrumbs, setBreadcrumbs] = useState<Breadcrumb[]>([]);
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
@@ -124,14 +130,15 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const [showUpload, setShowUpload] = useState(false);
   const [linkTargetFileId, setLinkTargetFileId] = useState<string | null>(null);
 
-  // === 获取数据 ===
+  // 👇 2. Modal 状态管理
+  const [confirmModal, setConfirmModal] = useState<{ isOpen: boolean; title: string; message: string; action: () => void }>({ isOpen: false, title: '', message: '', action: () => {} });
+  const [inputModal, setInputModal] = useState<{ isOpen: boolean; title: string; defaultValue: string; onSubmit: (val: string) => void }>({ isOpen: false, title: '', defaultValue: '', onSubmit: () => {} });
+
   const fetchData = async () => {
     try {
       const token = localStorage.getItem('token');
-      // ✅ 修复：添加默认值
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
       
-      // 1. 项目详情 (仅首次加载)
       if (!project) {
         const resProj = await fetch(`${apiUrl}/files/projects/${projectId}`, {
           headers: { Authorization: `Bearer ${token}` }
@@ -140,7 +147,6 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         setProject(await resProj.json());
       }
 
-      // 2. 文件列表 (仅在 Files Tab 下加载)
       if (activeTab === 'files') {
           let url = `${apiUrl}/files/projects/${projectId}/files`;
           if (currentFolderId) url += `?folder_id=${currentFolderId}`;
@@ -159,20 +165,24 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
     }
   };
 
-  // 目录切换 或 Tab 切换时重新加载
   useEffect(() => {
     fetchData();
   }, [currentFolderId, activeTab]);
 
-  // === 操作 Handlers ===
+  // === 使用 InputModal 替代 Prompt ===
+  const openCreateFolderModal = () => {
+    setInputModal({
+      isOpen: true,
+      title: "New Folder Name",
+      defaultValue: "",
+      onSubmit: (name) => createFolder(name)
+    });
+  };
 
-  const handleCreateFolder = async () => {
-    const name = prompt("Folder Name:");
-    if (!name) return;
+  const createFolder = async (name: string) => {
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-      
       let url = `${apiUrl}/files/projects/${projectId}/folders?folder_name=${encodeURIComponent(name)}`;
       if (currentFolderId) url += `&parent_id=${currentFolderId}`;
 
@@ -180,39 +190,26 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` }
       });
-      if (res.ok) fetchData();
-      else {
-          const err = await res.json();
-          alert(`创建失败: ${err.detail || 'Unknown error'}`);
-      }
-    } catch (e) { alert('网络错误'); }
-  };
-
-  const handleDownload = async (fileId: string) => {
-    try {
-      const token = localStorage.getItem('token');
-      // ✅ 修复：添加默认值
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-      
-      const res = await fetch(`${apiUrl}/files/files/${fileId}/download`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      
       if (res.ok) {
-        const { download_url } = await res.json();
-        const baseUrl = apiUrl.replace(/\/api\/v1\/?$/, '');
-        const fullUrl = `${baseUrl}${download_url}`;
-        
-        window.open(fullUrl, '_blank');
+          fetchData();
+          toast.success("Folder created");
       } else {
-        alert('无法下载 (可能是文件夹？)');
+          const err = await res.json();
+          toast.error(`Error: ${err.detail}`);
       }
-    } catch (e) { alert('请求失败'); }
+    } catch (e) { toast.error('Network error'); }
   };
 
-  const handleRename = async (fileId: string, currentName: string) => {
-    const newName = prompt("New Filename:", currentName);
-    if (!newName || newName === currentName) return;
+  const openRenameModal = (fileId: string, currentName: string) => {
+    setInputModal({
+      isOpen: true,
+      title: "Rename File/Folder",
+      defaultValue: currentName,
+      onSubmit: (newName) => renameFile(fileId, newName)
+    });
+  };
+
+  const renameFile = async (fileId: string, newName: string) => {
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
@@ -221,12 +218,45 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ new_name: newName })
       });
-      if (res.ok) fetchData();
-    } catch (e) { alert('网络错误'); }
+      if (res.ok) {
+          fetchData();
+          toast.success("Renamed");
+      }
+    } catch (e) { toast.error('Network error'); }
   };
 
-  const handleRemoveLink = async (fileId: string) => {
-    if (!confirm('从项目中移除此项？(保留物理文件)')) return;
+  const handleDownload = async (fileId: string) => {
+    const loadingToast = toast.loading("Preparing download...");
+    try {
+      const token = localStorage.getItem('token');
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+      const res = await fetch(`${apiUrl}/files/files/${fileId}/download`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      
+      if (res.ok) {
+        const { download_url } = await res.json();
+        const baseUrl = apiUrl.replace(/\/api\/v1\/?$/, '');
+        const fullUrl = `${baseUrl}${download_url}`;
+        window.open(fullUrl, '_blank');
+        toast.dismiss(loadingToast);
+      } else {
+        toast.error('Cannot download directories directly', { id: loadingToast });
+      }
+    } catch (e) { toast.error('Request failed', { id: loadingToast }); }
+  };
+
+  // === 使用 ConfirmModal 替代 window.confirm ===
+  const openRemoveLinkModal = (fileId: string) => {
+    setConfirmModal({
+      isOpen: true,
+      title: "Remove from Project",
+      message: "Are you sure? This will remove the file from this project view, but the file itself remains in storage.",
+      action: () => removeLink(fileId)
+    });
+  };
+
+  const removeLink = async (fileId: string) => {
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
@@ -234,15 +264,25 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
-      if (res.ok) fetchData();
-    } catch (e) { alert('网络错误'); }
+      if (res.ok) {
+          fetchData();
+          toast.success("Removed from project");
+      }
+    } catch (e) { toast.error('Network error'); }
   };
 
-  const handleHardDelete = async (fileId: string, isDir: boolean) => {
-    const msg = isDir 
-      ? '⚠️ 彻底删除文件夹？(当前版本不会自动删除子文件，请确保文件夹为空)' 
-      : '⚠️ 彻底物理删除该文件？无法恢复！';
-    if (!confirm(msg)) return;
+  const openHardDeleteModal = (fileId: string, isDir: boolean) => {
+    setConfirmModal({
+      isOpen: true,
+      title: isDir ? "Delete Folder" : "Delete File",
+      message: isDir 
+        ? "⚠️ Permanently delete this folder? Please ensure it is empty first." 
+        : "⚠️ Permanently delete this file? This action cannot be undone!",
+      action: () => hardDelete(fileId)
+    });
+  };
+
+  const hardDelete = async (fileId: string) => {
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
@@ -250,9 +290,14 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
-      if (res.ok) { alert('已删除'); fetchData(); }
-      else { const err = await res.json(); alert(`失败: ${err.detail}`); }
-    } catch (e) { alert('网络错误'); }
+      if (res.ok) { 
+          toast.success('Permanently deleted');
+          fetchData(); 
+      } else { 
+          const err = await res.json(); 
+          toast.error(`Failed: ${err.detail}`);
+      }
+    } catch (e) { toast.error('Network error'); }
   };
 
   const formatSize = (bytes: number) => {
@@ -292,10 +337,16 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                     Files
                 </button>
                 <button 
+                  onClick={() => setActiveTab('samples')}
+                  className={`pb-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'samples' ? 'border-blue-500 text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`}
+                >
+                    Samples
+                </button>
+                <button 
                   onClick={() => setActiveTab('workflow')}
                   className={`pb-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'workflow' ? 'border-blue-500 text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`}
                 >
-                    Samples & Workflow
+                    Workflow
                 </button>
             </div>
           </div>
@@ -303,7 +354,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           {/* File Tab Specific Actions */}
           {activeTab === 'files' && (
              <div className="flex gap-3 mb-2">
-                <button onClick={handleCreateFolder} className="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-700 transition-colors text-sm">
+                <button onClick={openCreateFolderModal} className="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-700 transition-colors text-sm">
                     + New Folder
                 </button>
                 <button onClick={() => setShowUpload(true)} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg shadow-lg shadow-blue-900/20 transition-colors text-sm">
@@ -314,7 +365,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         </div>
 
         {/* Tab Content */}
-        {activeTab === 'files' ? (
+        {activeTab === 'files' && (
             <>
                  {/* 面包屑导航 */}
                 <div className="flex items-center gap-2 text-sm text-gray-400 mb-4 bg-gray-900/50 p-3 rounded-lg border border-gray-800">
@@ -384,21 +435,19 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                                 </button>
                                 )}
                                 
-                                {!file.is_directory && (
                                 <button onClick={() => setLinkTargetFileId(file.id)} className="text-emerald-400 hover:text-emerald-300 p-1" title="Share to Project">
                                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" /></svg>
                                 </button>
-                                )}
 
-                                <button onClick={() => handleRename(file.id, file.filename)} className="text-yellow-400 hover:text-yellow-300 p-1" title="Rename">
+                                <button onClick={() => openRenameModal(file.id, file.filename)} className="text-yellow-400 hover:text-yellow-300 p-1" title="Rename">
                                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                                 </button>
 
-                                <button onClick={() => handleRemoveLink(file.id)} className="text-gray-400 hover:text-white p-1" title="Remove from Project">
+                                <button onClick={() => openRemoveLinkModal(file.id)} className="text-gray-400 hover:text-white p-1" title="Remove from Project">
                                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
                                 </button>
 
-                                <button onClick={() => handleHardDelete(file.id, file.is_directory)} className="text-red-500 hover:text-red-400 p-1" title="Permanently Delete">
+                                <button onClick={() => openHardDeleteModal(file.id, file.is_directory)} className="text-red-500 hover:text-red-400 p-1" title="Permanently Delete">
                                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                                 </button>
                             </div>
@@ -409,30 +458,28 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                     </table>
                 </div>
             </>
-        ) : (
-            // 🆕 样本与分析工作流组件 (垂直布局：上方是样本管理，下方是分析管理)
-            <div className="space-y-10">
-                <SampleManager projectId={projectId as string} />
-                
-                <div className="border-t border-gray-800 pt-8">
-                    <AnalysisManager projectId={projectId as string} />
-                </div>
-            </div>
+        )}
+
+        {activeTab === 'samples' && (
+            <SampleManager projectId={projectId as string} />
+        )}
+
+        {activeTab === 'workflow' && (
+            <AnalysisManager projectId={projectId as string} />
         )}
 
       </main>
 
-      {/* UploadModal */}
+      {/* Global Modals */}
       {showUpload && (
         <UploadModal 
            projectId={projectId as string}
-           currentFolderId={currentFolderId} // ✅ 使用正确的 Props 名
+           currentFolderId={currentFolderId} 
            onClose={() => setShowUpload(false)} 
            onUploadSuccess={fetchData} 
         />
       )}
 
-      {/* LinkModal */}
       {linkTargetFileId && (
         <LinkProjectModal
           fileId={linkTargetFileId}
@@ -441,6 +488,23 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           onSuccess={fetchData}
         />
       )}
+
+      {/* 新的通用模态框 */}
+      <ConfirmModal 
+        isOpen={confirmModal.isOpen}
+        title={confirmModal.title}
+        message={confirmModal.message}
+        onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+        onConfirm={confirmModal.action}
+      />
+
+      <InputModal
+        isOpen={inputModal.isOpen}
+        title={inputModal.title}
+        defaultValue={inputModal.defaultValue}
+        onClose={() => setInputModal(prev => ({ ...prev, isOpen: false }))}
+        onSubmit={inputModal.onSubmit}
+      />
     </div>
   );
 }

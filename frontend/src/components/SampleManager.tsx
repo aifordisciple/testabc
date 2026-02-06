@@ -1,8 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import toast from 'react-hot-toast'; // 👈
+import toast from 'react-hot-toast';
+import ConfirmModal from './ConfirmModal'; // 👈 引入
 
+// ... 保持原有 interface 定义不变 ...
 interface FileData {
   id: string;
   filename: string;
@@ -28,7 +30,6 @@ export default function SampleManager({ projectId }: { projectId: string }) {
   const [sheets, setSheets] = useState<SampleSheet[]>([]);
   const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
-  
   const [availableFiles, setAvailableFiles] = useState<FileData[]>([]);
   
   const [isCreatingSheet, setIsCreatingSheet] = useState(false);
@@ -43,6 +44,20 @@ export default function SampleManager({ projectId }: { projectId: string }) {
     r2_file_id: ''
   });
 
+  // 👇 新增状态：控制确认弹窗
+  const [confirmState, setConfirmState] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    action: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    action: () => {},
+  });
+
+  // ... 保持 fetchSheets, fetchSamples, fetchFiles, useEffect, handleCreateSheet, handleAddSample 不变 ...
   const fetchSheets = async () => {
     try {
       const token = localStorage.getItem('token');
@@ -106,7 +121,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
         body: JSON.stringify({ name: newSheetName, project_id: projectId })
       });
       if (res.ok) {
-        toast.success("Sample sheet created"); // 👈
+        toast.success("Sample sheet created");
         setNewSheetName('');
         setIsCreatingSheet(false);
         fetchSheets();
@@ -116,7 +131,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
 
   const handleAddSample = async () => {
     if (!activeSheetId || !newSample.name || !newSample.r1_file_id) {
-      toast.error("Please fill Name and select R1 File"); // 👈
+      toast.error("Please fill Name and select R1 File");
       return;
     }
     try {
@@ -142,7 +157,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
       });
 
       if (res.ok) {
-        toast.success("Sample added"); // 👈
+        toast.success("Sample added");
         setIsAddingSample(false);
         setNewSample({ name: '', group: 'control', replicate: 1, r1_file_id: '', r2_file_id: '' });
         fetchSamples(activeSheetId);
@@ -153,8 +168,17 @@ export default function SampleManager({ projectId }: { projectId: string }) {
     } catch (e) { toast.error('Network error'); }
   };
 
-  const handleDeleteSample = async (sampleId: string) => {
-    if(!confirm("Are you sure?")) return;
+  // 👇 修改：Trigger Confirm Modal
+  const confirmDeleteSample = (sampleId: string) => {
+    setConfirmState({
+      isOpen: true,
+      title: "Delete Sample",
+      message: "Are you sure you want to delete this sample? This cannot be undone.",
+      action: () => deleteSample(sampleId)
+    });
+  };
+
+  const deleteSample = async (sampleId: string) => {
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
@@ -163,14 +187,23 @@ export default function SampleManager({ projectId }: { projectId: string }) {
          headers: { Authorization: `Bearer ${token}` }
       });
       if(res.ok) {
-          toast.success("Sample deleted"); // 👈
+          toast.success("Sample deleted");
           if (activeSheetId) fetchSamples(activeSheetId);
       }
     } catch (e) { toast.error('Delete failed'); }
   };
   
-  const handleDeleteSheet = async (sheetId: string) => {
-      if(!confirm("Delete this sheet?")) return;
+  // 👇 修改：Trigger Confirm Modal
+  const confirmDeleteSheet = (sheetId: string) => {
+    setConfirmState({
+      isOpen: true,
+      title: "Delete Sample Sheet",
+      message: "Are you sure you want to delete this sheet? All samples defined in it will also be deleted.",
+      action: () => deleteSheet(sheetId)
+    });
+  };
+
+  const deleteSheet = async (sheetId: string) => {
       try {
         const token = localStorage.getItem('token');
         const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
@@ -179,7 +212,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
            headers: { Authorization: `Bearer ${token}` }
         });
         if(res.ok) {
-            toast.success("Sheet deleted"); // 👈
+            toast.success("Sheet deleted");
             if (activeSheetId === sheetId) setActiveSheetId(null);
             fetchSheets();
         }
@@ -188,8 +221,18 @@ export default function SampleManager({ projectId }: { projectId: string }) {
 
   return (
     <div className="flex h-[calc(100vh-200px)] gap-6">
+      {/* 👈 插入 ConfirmModal */}
+      <ConfirmModal 
+        isOpen={confirmState.isOpen}
+        title={confirmState.title}
+        message={confirmState.message}
+        onClose={() => setConfirmState(prev => ({ ...prev, isOpen: false }))}
+        onConfirm={confirmState.action}
+      />
+
       {/* 左侧：实验单列表 */}
       <div className="w-1/4 bg-gray-900 border border-gray-800 rounded-xl p-4 flex flex-col">
+        {/* ... 保持不变 ... */}
         <div className="flex justify-between items-center mb-4">
           <h3 className="font-bold text-lg">Sample Sheets</h3>
           <button 
@@ -229,7 +272,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
                 <div className="text-xs text-gray-500">{new Date(sheet.created_at).toLocaleDateString()}</div>
               </div>
               <button 
-                  onClick={(e) => { e.stopPropagation(); handleDeleteSheet(sheet.id); }}
+                  onClick={(e) => { e.stopPropagation(); confirmDeleteSheet(sheet.id); }} // 👈 修改调用
                   className="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
               >
                   ×
@@ -244,6 +287,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
       <div className="w-3/4 bg-gray-900 border border-gray-800 rounded-xl p-6 flex flex-col">
         {activeSheetId ? (
           <>
+            {/* ... 保持不变 ... */}
             <div className="flex justify-between items-center mb-6">
               <h3 className="font-bold text-xl">
                  Samples 
@@ -260,6 +304,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
             </div>
 
             {isAddingSample && (
+              // ... Add Form (保持不变) ...
               <div className="bg-gray-800/50 border border-gray-700 p-4 rounded-lg mb-6 animate-in fade-in slide-in-from-top-2">
                 <h4 className="font-bold text-sm mb-3 text-blue-400">New Sample Definition</h4>
                 <div className="grid grid-cols-3 gap-4 mb-4">
@@ -348,7 +393,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
                         {sample.files ? `${sample.files.length} Files Linked` : 'No Files'}
                       </td>
                       <td className="px-4 py-3 text-right">
-                         <button onClick={() => handleDeleteSample(sample.id)} className="text-red-500 hover:text-red-400">Delete</button>
+                         <button onClick={() => confirmDeleteSample(sample.id)} className="text-red-500 hover:text-red-400">Delete</button> {/* 👈 修改调用 */}
                       </td>
                     </tr>
                   ))}

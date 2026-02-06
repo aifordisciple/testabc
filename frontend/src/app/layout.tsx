@@ -1,9 +1,6 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
 import './globals.css';
-import { Toaster } from 'react-hot-toast'; // 👈 1. 引入
-
-const inter = Inter({ subsets: ['latin'] });
+import { Toaster } from 'react-hot-toast';
 
 export const metadata: Metadata = {
   title: 'Autonome',
@@ -17,9 +14,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={inter.className}>
+      {/* ⚠️ 移除 inter.className，改用 Tailwind 类名设置默认背景 */}
+      <body className="antialiased bg-gray-950 text-white">
         {children}
-        {/* 👇 2. 添加 Toaster 组件 */}
+        
         <Toaster 
           position="top-center"
           toastOptions={{
