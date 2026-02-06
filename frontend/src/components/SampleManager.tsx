@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import toast from 'react-hot-toast'; // 👈
 
 interface FileData {
   id: string;
@@ -20,7 +21,7 @@ interface Sample {
   name: string;
   group: string;
   replicate: number;
-  files: any[]; // 简化处理，后端 SamplePublic 返回 files 列表
+  files: any[];
 }
 
 export default function SampleManager({ projectId }: { projectId: string }) {
@@ -28,10 +29,8 @@ export default function SampleManager({ projectId }: { projectId: string }) {
   const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
   
-  // 文件选择相关
   const [availableFiles, setAvailableFiles] = useState<FileData[]>([]);
   
-  // 表单状态
   const [isCreatingSheet, setIsCreatingSheet] = useState(false);
   const [newSheetName, setNewSheetName] = useState('');
   
@@ -44,9 +43,6 @@ export default function SampleManager({ projectId }: { projectId: string }) {
     r2_file_id: ''
   });
 
-  // === 加载数据 ===
-  
-  // 1. 加载实验单列表
   const fetchSheets = async () => {
     try {
       const token = localStorage.getItem('token');
@@ -58,7 +54,6 @@ export default function SampleManager({ projectId }: { projectId: string }) {
     } catch (e) { console.error(e); }
   };
 
-  // 2. 加载选中实验单的样本
   const fetchSamples = async (sheetId: string) => {
     try {
       const token = localStorage.getItem('token');
@@ -70,18 +65,15 @@ export default function SampleManager({ projectId }: { projectId: string }) {
     } catch (e) { console.error(e); }
   };
 
-  // 3. 加载项目所有文件 (用于下拉选择)
   const fetchFiles = async () => {
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-      // 使用 recursive=true 获取扁平化的文件列表
       const res = await fetch(`${apiUrl}/files/projects/${projectId}/files?recursive=true`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (res.ok) {
         const data = await res.json();
-        // 只保留文件，过滤掉文件夹
         setAvailableFiles(data.files.filter((f: FileData) => !f.is_directory));
       }
     } catch (e) { console.error(e); }
@@ -100,8 +92,6 @@ export default function SampleManager({ projectId }: { projectId: string }) {
     }
   }, [activeSheetId]);
 
-  // === 操作 Handlers ===
-
   const handleCreateSheet = async () => {
     if (!newSheetName) return;
     try {
@@ -116,16 +106,17 @@ export default function SampleManager({ projectId }: { projectId: string }) {
         body: JSON.stringify({ name: newSheetName, project_id: projectId })
       });
       if (res.ok) {
+        toast.success("Sample sheet created"); // 👈
         setNewSheetName('');
         setIsCreatingSheet(false);
         fetchSheets();
       }
-    } catch (e) { alert('创建失败'); }
+    } catch (e) { toast.error('Creation failed'); }
   };
 
   const handleAddSample = async () => {
     if (!activeSheetId || !newSample.name || !newSample.r1_file_id) {
-      alert("请填写完整信息 (Sample Name 和 R1 File 是必填项)");
+      toast.error("Please fill Name and select R1 File"); // 👈
       return;
     }
     try {
@@ -151,45 +142,52 @@ export default function SampleManager({ projectId }: { projectId: string }) {
       });
 
       if (res.ok) {
+        toast.success("Sample added"); // 👈
         setIsAddingSample(false);
         setNewSample({ name: '', group: 'control', replicate: 1, r1_file_id: '', r2_file_id: '' });
         fetchSamples(activeSheetId);
       } else {
         const err = await res.json();
-        alert(`添加失败: ${err.detail}`);
+        toast.error(`Error: ${err.detail}`);
       }
-    } catch (e) { alert('网络错误'); }
+    } catch (e) { toast.error('Network error'); }
   };
 
   const handleDeleteSample = async (sampleId: string) => {
-    if(!confirm("确认删除该样本？")) return;
+    if(!confirm("Are you sure?")) return;
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-      await fetch(`${apiUrl}/workflow/samples/${sampleId}`, {
+      const res = await fetch(`${apiUrl}/workflow/samples/${sampleId}`, {
          method: 'DELETE',
          headers: { Authorization: `Bearer ${token}` }
       });
-      if (activeSheetId) fetchSamples(activeSheetId);
-    } catch (e) { alert('删除失败'); }
+      if(res.ok) {
+          toast.success("Sample deleted"); // 👈
+          if (activeSheetId) fetchSamples(activeSheetId);
+      }
+    } catch (e) { toast.error('Delete failed'); }
   };
   
   const handleDeleteSheet = async (sheetId: string) => {
-      if(!confirm("确认删除实验单？这将同时删除其中定义的所有样本关联。")) return;
+      if(!confirm("Delete this sheet?")) return;
       try {
         const token = localStorage.getItem('token');
         const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-        await fetch(`${apiUrl}/workflow/sample_sheets/${sheetId}`, {
+        const res = await fetch(`${apiUrl}/workflow/sample_sheets/${sheetId}`, {
            method: 'DELETE',
            headers: { Authorization: `Bearer ${token}` }
         });
-        if (activeSheetId === sheetId) setActiveSheetId(null);
-        fetchSheets();
-      } catch (e) { alert('删除失败'); }
+        if(res.ok) {
+            toast.success("Sheet deleted"); // 👈
+            if (activeSheetId === sheetId) setActiveSheetId(null);
+            fetchSheets();
+        }
+      } catch (e) { toast.error('Delete failed'); }
   };
 
   return (
-    <div className="flex h-[calc(70vh-200px)] gap-6">
+    <div className="flex h-[calc(100vh-200px)] gap-6">
       {/* 左侧：实验单列表 */}
       <div className="w-1/4 bg-gray-900 border border-gray-800 rounded-xl p-4 flex flex-col">
         <div className="flex justify-between items-center mb-4">
@@ -206,7 +204,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
           <div className="mb-4 bg-gray-800 p-3 rounded-lg">
             <input 
               className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm mb-2 text-white"
-              placeholder="Sheet Name (e.g. RNA-Seq Batch 1)"
+              placeholder="Sheet Name"
               value={newSheetName}
               onChange={e => setNewSheetName(e.target.value)}
             />
@@ -238,7 +236,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
               </button>
             </div>
           ))}
-          {sheets.length === 0 && <div className="text-gray-600 text-sm text-center mt-10">暂无实验单</div>}
+          {sheets.length === 0 && <div className="text-gray-600 text-sm text-center mt-10">No sheets</div>}
         </div>
       </div>
 
@@ -261,13 +259,12 @@ export default function SampleManager({ projectId }: { projectId: string }) {
               </button>
             </div>
 
-            {/* 添加样本表单 */}
             {isAddingSample && (
               <div className="bg-gray-800/50 border border-gray-700 p-4 rounded-lg mb-6 animate-in fade-in slide-in-from-top-2">
                 <h4 className="font-bold text-sm mb-3 text-blue-400">New Sample Definition</h4>
                 <div className="grid grid-cols-3 gap-4 mb-4">
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1">Sample Name</label>
+                    <label className="block text-xs text-gray-400 mb-1">Name</label>
                     <input 
                       className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-white"
                       value={newSample.name}
@@ -284,7 +281,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1">Replicate</label>
+                    <label className="block text-xs text-gray-400 mb-1">Rep</label>
                     <input 
                       type="number"
                       className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-white"
@@ -325,12 +322,11 @@ export default function SampleManager({ projectId }: { projectId: string }) {
 
                 <div className="flex justify-end gap-3">
                   <button onClick={() => setIsAddingSample(false)} className="px-3 py-1 text-sm text-gray-400">Cancel</button>
-                  <button onClick={handleAddSample} className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded text-sm">Save Sample</button>
+                  <button onClick={handleAddSample} className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded text-sm">Save</button>
                 </div>
               </div>
             )}
 
-            {/* 样本列表表格 */}
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
                 <thead className="bg-gray-800 text-gray-400">
@@ -349,8 +345,6 @@ export default function SampleManager({ projectId }: { projectId: string }) {
                       <td className="px-4 py-3 text-gray-400">{sample.group}</td>
                       <td className="px-4 py-3 text-gray-400">{sample.replicate}</td>
                       <td className="px-4 py-3 text-gray-500">
-                        {/* 这里后端目前还没把 filename 带出来，只带了 files 关联，可能需要优化 SamplePublic 返回详细 file info */}
-                        {/* 临时展示文件数量 */}
                         {sample.files ? `${sample.files.length} Files Linked` : 'No Files'}
                       </td>
                       <td className="px-4 py-3 text-right">
@@ -359,7 +353,7 @@ export default function SampleManager({ projectId }: { projectId: string }) {
                     </tr>
                   ))}
                   {samples.length === 0 && (
-                    <tr><td colSpan={5} className="p-8 text-center text-gray-500">No samples defined yet.</td></tr>
+                    <tr><td colSpan={5} className="p-8 text-center text-gray-500">No samples defined.</td></tr>
                   )}
                 </tbody>
               </table>

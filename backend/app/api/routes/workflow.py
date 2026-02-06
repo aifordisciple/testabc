@@ -1,6 +1,5 @@
-# backend/app/api/routes/workflow.py
-
 from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 from typing import List, Optional
 import uuid
@@ -15,7 +14,6 @@ from app.models.user import (
     Analysis, AnalysisCreate, AnalysisPublic
 )
 from app.worker import run_workflow_task
-# 暂时不需要 workflow_service，直到第三阶段
 
 router = APIRouter()
 
@@ -71,8 +69,6 @@ def delete_sample_sheet(
     if project.owner_id != current_user.id:
         raise HTTPException(403, "Permission denied")
 
-    # 级联删除 Samples 会由数据库或 SQLModel 处理 (如果在 ORM 定义了 cascade)
-    # 这里的 cascade="all, delete" 定义在 User.py 中，SQLAlchemy 会处理
     session.delete(sheet)
     session.commit()
     return {"status": "deleted"}
@@ -105,9 +101,6 @@ def add_sample(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    添加样本并自动关联文件
-    """
     sheet = session.get(SampleSheet, sheet_id)
     if not sheet:
         raise HTTPException(404, "Sample sheet not found")
@@ -164,7 +157,6 @@ def delete_sample(
     if project.owner_id != current_user.id:
         raise HTTPException(403, "Permission denied")
 
-    # 手动删除关联表记录
     links = session.exec(select(SampleFileLink).where(SampleFileLink.sample_id == sample_id)).all()
     for link in links:
         session.delete(link)
@@ -247,15 +239,20 @@ def get_analysis_report(
     analysis = session.get(Analysis, analysis_id)
     if not analysis:
         raise HTTPException(404, "Analysis not found")
-        
-    # 临时硬编码路径，后续在 service 中统一
+    
+    # 修复：直接使用数据库中记录的 work_dir
+    # 注意：work_dir 可能是宿主机路径，但通过 docker volume 映射，容器内也能访问该路径
+    if not analysis.work_dir:
+         raise HTTPException(404, "Analysis not started or work_dir missing")
+
     report_path = os.path.join(
-        "/data/workspace",  # 假设的基础路径，需与 worker 一致
-        str(analysis.id), 
+        analysis.work_dir, 
         "results", "multiqc", "multiqc_report.html"
     )
     
     if not os.path.exists(report_path):
-        raise HTTPException(404, "Report not generated yet")
+        # 调试信息：打印路径以便排查
+        print(f"DEBUG: Report not found at {report_path}")
+        raise HTTPException(404, f"Report not generated yet at {report_path}")
         
     return FileResponse(report_path)

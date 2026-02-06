@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import toast from 'react-hot-toast'; // 👈 引入 toast
 
 interface Analysis {
   id: string;
@@ -33,8 +34,6 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
   const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
   const [logContent, setLogContent] = useState('');
 
-  // === 辅助函数：去除 ANSI 转义字符 ===
-  // 这能把 [32m, [K, [3A 等乱码全部替换为空字符串，只保留纯文本
   const stripAnsi = (str: string) => {
     // eslint-disable-next-line
     return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
@@ -74,8 +73,13 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
   }, [projectId]);
 
   const handleRun = async () => {
-    if (!selectedSheetId) return alert("Please select a sample sheet first.");
+    if (!selectedSheetId) {
+        toast.error("Please select a sample sheet first."); // 👈 Toast
+        return;
+    }
     setRunning(true);
+    const loadingToast = toast.loading("Submitting workflow..."); // 👈 Loading Toast
+
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
@@ -90,14 +94,16 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
         })
       });
       if (res.ok) {
-        alert('Workflow submitted successfully!');
+        toast.success('Workflow started successfully!', { id: loadingToast }); // 👈 Success Toast
         setShowRunModal(false);
         fetchAnalyses();
       } else {
         const err = await res.json();
-        alert(`Failed: ${err.detail}`);
+        toast.error(`Failed: ${err.detail}`, { id: loadingToast }); // 👈 Error Toast
       }
-    } catch (e) { alert('Network error'); } finally { setRunning(false); }
+    } catch (e) { 
+        toast.error('Network error', { id: loadingToast });
+    } finally { setRunning(false); }
   };
 
   const handleViewLog = async (id: string) => {
@@ -117,6 +123,7 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
   };
 
   const handleViewReport = async (id: string) => {
+    const loadingToast = toast.loading("Opening report...");
     try {
         const token = localStorage.getItem('token');
         const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
@@ -127,10 +134,14 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
             const blob = await res.blob();
             const url = window.URL.createObjectURL(blob);
             window.open(url, '_blank');
+            toast.dismiss(loadingToast);
         } else {
-            alert('Report not found or not ready.');
+            // 解析错误信息，如果是 404 说明文件真不存在
+            toast.error('Report not found. Has the pipeline finished successfully?', { id: loadingToast });
         }
-    } catch (e) { alert('Error opening report'); }
+    } catch (e) { 
+        toast.error('Error opening report', { id: loadingToast });
+    }
   };
 
   const getStatusColor = (status: string) => {
@@ -241,7 +252,6 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
                     <button onClick={() => setSelectedLogId(null)} className="text-gray-400 hover:text-white">✕</button>
                 </div>
                 <div className="flex-1 p-4 overflow-auto bg-black rounded-b-xl">
-                    {/* ⚠️ 核心修改：使用 stripAnsi 处理日志内容 */}
                     <pre className="text-xs text-green-400 font-mono whitespace-pre-wrap">{stripAnsi(logContent)}</pre>
                 </div>
             </div>

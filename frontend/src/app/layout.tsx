@@ -1,21 +1,47 @@
-import type { Metadata } from "next";
-import "./globals.css";
+import type { Metadata } from 'next';
+import { Inter } from 'next/font/google';
+import './globals.css';
+import { Toaster } from 'react-hot-toast'; // 👈 1. 引入
+
+const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: "Autonome - AI Cloud Bio Platform",
-  description: "Next Gen Agentic Bioinformatics",
+  title: 'Autonome',
+  description: 'Bioinformatics Analysis Platform',
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode;
-}>) {
+}) {
   return (
     <html lang="en">
-      {/* 移除了 className 中的字体变量，直接使用 body */}
-      <body className="antialiased bg-gray-950">
+      <body className={inter.className}>
         {children}
+        {/* 👇 2. 添加 Toaster 组件 */}
+        <Toaster 
+          position="top-center"
+          toastOptions={{
+            style: {
+              background: '#1f2937', // bg-gray-800
+              color: '#fff',
+              border: '1px solid #374151', // border-gray-700
+            },
+            success: {
+              iconTheme: {
+                primary: '#10b981', // emerald-500
+                secondary: '#fff',
+              },
+            },
+            error: {
+              iconTheme: {
+                primary: '#ef4444', // red-500
+                secondary: '#fff',
+              },
+            }
+          }}
+        />
       </body>
     </html>
   );

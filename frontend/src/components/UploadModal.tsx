@@ -1,10 +1,10 @@
 'use client';
 import { useState } from 'react';
+import toast from 'react-hot-toast'; // 👈
 
-// ✅ 关键修复：确保接口定义包含 currentFolderId
 interface UploadModalProps {
   projectId: string;
-  currentFolderId?: string | null; // 👈 必须加上这行
+  currentFolderId?: string | null;
   onClose: () => void;
   onUploadSuccess: () => void;
 }
@@ -18,6 +18,7 @@ export default function UploadModal({ projectId, currentFolderId, onClose, onUpl
     if (!file) return;
     setUploading(true);
     setProgress(10);
+    const loadingToast = toast.loading("Uploading file..."); // 👈
 
     try {
       const token = localStorage.getItem('token');
@@ -26,14 +27,10 @@ export default function UploadModal({ projectId, currentFolderId, onClose, onUpl
       const formData = new FormData();
       formData.append('file', file);
       
-      // 如果当前在某个文件夹内，带上 parent_id
       if (currentFolderId) {
         formData.append('parent_id', currentFolderId);
       }
 
-      // 这里的 API 路径必须与后端 routes/files.py 定义一致
-      // 后端定义: @router.post("/upload") ... upload_file(project_id: uuid.UUID ...)
-      // 所以是 POST /api/v1/files/upload?project_id=...
       const res = await fetch(`${apiUrl}/files/upload?project_id=${projectId}`, {
         method: 'POST',
         headers: {
@@ -50,12 +47,12 @@ export default function UploadModal({ projectId, currentFolderId, onClose, onUpl
       setProgress(100);
       setUploading(false);
       onUploadSuccess();
-      alert('上传成功！');
+      toast.success('File uploaded successfully!', { id: loadingToast }); // 👈
       onClose();
 
     } catch (e: any) {
       console.error(e);
-      alert(`上传失败: ${e.message}`);
+      toast.error(`Upload failed: ${e.message}`, { id: loadingToast }); // 👈
       setUploading(false);
     }
   };
