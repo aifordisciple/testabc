@@ -1,13 +1,19 @@
 nextflow.enable.dsl=2
 
+// === 参数定义 (Default Values) ===
+// 这些默认值会被 params.json 中的值覆盖
 params.input = null
 params.outdir = 'results'
+params.skip_multiqc = false  // 👈 新增参数：默认不跳过
+params.fastqc_args = ""      // 👈 新增参数：默认无额外参数
 
 log.info """\
     R N A - S E Q   Q C
     ===================
-    input : ${params.input}
-    outdir: ${params.outdir}
+    input       : ${params.input}
+    outdir      : ${params.outdir}
+    skip_multiqc: ${params.skip_multiqc}
+    fastqc_args : "${params.fastqc_args}"
     """
 
 // 1. 解析 CSV 输入
@@ -30,17 +36,15 @@ process FASTQC {
     input:
     tuple val(sample_id), path(reads)
 
-    // ⚠️ 修改：输出整个文件夹，利用 sample_id 隔离命名空间
     output:
-    path "${sample_id}_fastqc", emit: fastqc_results
+    path "${sample_id}_logs", emit: fastqc_results
 
     script:
     """
-    # 创建以样本名命名的目录
-    mkdir ${sample_id}_fastqc
+    mkdir ${sample_id}_logs
     
-    # -o 指定输出目录
-    fastqc -o ${sample_id}_fastqc -q ${reads}
+    # 注入用户配置的参数 ${params.fastqc_args}
+    fastqc ${params.fastqc_args} -o ${sample_id}_logs -q ${reads}
     """
 }
 
@@ -50,7 +54,7 @@ process MULTIQC {
     container 'quay.io/biocontainers/multiqc:1.19--pyhdfd78af_0'
 
     input:
-    path '*' // 收集所有输入（现在是多个文件夹）
+    path '*' 
 
     output:
     path "multiqc_report.html"
@@ -58,12 +62,15 @@ process MULTIQC {
 
     script:
     """
-    # MultiQC 会递归扫描当前目录下的所有子文件夹
     multiqc .
     """
 }
 
 workflow {
     FASTQC(reads_ch)
-    MULTIQC(FASTQC.out.fastqc_results.collect())
+    
+    // 逻辑控制：如果用户没选 skip_multiqc，才运行 MultiQC
+    if (!params.skip_multiqc) {
+        MULTIQC(FASTQC.out.fastqc_results.collect())
+    }
 }

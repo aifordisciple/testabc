@@ -1,6 +1,7 @@
 import os
 import subprocess
 import csv
+import json
 from uuid import UUID
 from datetime import datetime
 from sqlmodel import Session, select
@@ -8,19 +9,16 @@ from app.models.user import Analysis, Project, Sample, File, SampleFileLink, Sam
 
 class WorkflowService:
     def __init__(self):
-        # === 核心修改：支持 DooD (Docker-out-of-Docker) ===
-        # 优先读取宿主机的真实工作路径，以便 Nextflow 发送给 Docker 的路径在宿主机上是有效的
-        # 如果未设置，回退到容器内部路径 /app/workspace
+        # 优先读取宿主机的真实工作路径 (DooD模式)
         self.base_work_dir = os.getenv("HOST_WORK_DIR", "/app/workspace")
         
-        # 确保目录存在
         if not os.path.exists(self.base_work_dir):
             try:
                 os.makedirs(self.base_work_dir, exist_ok=True)
             except Exception as e:
                 print(f"⚠️ Warning: Could not create work dir {self.base_work_dir}: {e}")
 
-        # 宿主机数据根目录 (用于 input files)
+        # 宿主机数据根目录
         self.host_data_root = os.getenv(
             "HOST_DATA_ROOT", 
             "/opt/data1/public/software/systools/autonome/autonome_data"
@@ -46,7 +44,6 @@ class WorkflowService:
                 if not file_rec: continue
                 if not file_rec.s3_key: continue
                     
-                # 拼接绝对路径
                 abs_path = os.path.join(self.host_data_root, file_rec.s3_key)
                 
                 if link.file_role == "R1":
@@ -74,7 +71,6 @@ class WorkflowService:
         if not analysis:
             raise ValueError(f"Analysis {analysis_id} not found")
             
-        # 使用 base_work_dir (可能是宿主机路径)
         run_dir = os.path.join(self.base_work_dir, str(analysis.id))
         results_dir = os.path.join(run_dir, "results")
         
@@ -101,6 +97,7 @@ class WorkflowService:
             session.commit()
             return
 
+        # 1. 生成 SampleSheet
         try:
             write_log("📝 Generating samplesheet...")
             samplesheet_path = os.path.join(run_dir, "samplesheet.csv")
@@ -113,8 +110,21 @@ class WorkflowService:
             session.commit()
             return
 
-        # 这里的 pipeline path 仍然是容器内的相对路径 /app/pipelines/...
-        # 只要 backend 容器能读到即可，Nextflow 会处理
+        # 2. 生成 params.json
+        params_path = os.path.join(run_dir, "params.json")
+        try:
+            params_dict = json.loads(analysis.params_json) if analysis.params_json else {}
+            
+            with open(params_path, "w") as f:
+                json.dump(params_dict, f, indent=2)
+            
+            write_log(f"⚙️ Parameters loaded: {json.dumps(params_dict)}")
+        except Exception as e:
+            write_log(f"⚠️ Warning: Failed to parse parameters: {e}")
+            with open(params_path, "w") as f:
+                f.write("{}")
+
+        # 3. 定位流程脚本
         pipeline_name = analysis.workflow 
         pipeline_path = os.path.abspath(f"pipelines/{pipeline_name}/main.nf")
         
@@ -127,10 +137,14 @@ class WorkflowService:
                  session.commit()
                  return
 
+        # 4. 构建命令
+        # ⚠️ 修改：移除了 -ansi-log false，因为它导致了报错
         cmd = [
-            "nextflow", "run", pipeline_path,
+            "nextflow",
+            "run", pipeline_path,
             "--input", samplesheet_path,
-            "--outdir", results_dir
+            "--outdir", results_dir,
+            "-params-file", params_path 
         ]
         
         analysis.status = "running"

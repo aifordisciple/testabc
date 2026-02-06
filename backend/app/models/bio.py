@@ -4,44 +4,46 @@ from datetime import datetime
 import uuid
 from app.models.user import User
 
-# === Project (项目) ===
-class ProjectBase(SQLModel):
-    name: str = Field(index=True)
+
+# =======================
+# 流程模版模型 (WorkflowTemplate)
+# =======================
+class WorkflowTemplateBase(SQLModel):
+    name: str = Field(index=True, unique=True)
     description: Optional[str] = None
-
-class Project(ProjectBase, table=True):
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    owner_id: int = Field(foreign_key="user.id")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
     
-    # 关系链接
-    owner: Optional[User] = Relationship(back_populates="projects")
-    files: List["File"] = Relationship(back_populates="project")
+    # 分类系统
+    category: str = Field(default="Analysis", index=True) # e.g. "Analysis", "Utility"
+    subcategory: Optional[str] = Field(default=None)    # e.g. "RNA-Seq", "QC"
+    
+    # 执行相关
+    script_path: str # 对应 pipelines/ 下的目录名，如 "rnaseq_qc"
+    default_container: Optional[str] = None # 默认 Docker 镜像
+    
+    # 参数定义 (JSON Schema)
+    # 示例: { "properties": { "threads": { "type": "integer", "default": 4 } } }
+    params_schema: str = Field(default="{}") 
 
-class ProjectCreate(ProjectBase):
+class WorkflowTemplate(WorkflowTemplateBase, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # 权限控制：是否仅管理员可见，或者公开
+    is_public: bool = Field(default=True)
+
+class WorkflowTemplateCreate(WorkflowTemplateBase):
     pass
 
-class ProjectPublic(ProjectBase):
+class WorkflowTemplateUpdate(SQLModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    script_path: Optional[str] = None
+    params_schema: Optional[str] = None
+    is_public: Optional[bool] = None
+
+class WorkflowTemplatePublic(WorkflowTemplateBase):
     id: uuid.UUID
-    created_at: datetime
-    owner_id: int
-
-# === File (文件 - 虚拟文件系统 VFS) ===
-class FileBase(SQLModel):
-    filename: str
-    size: int
-    content_type: str
-    # 生物学元数据 (如: {"sequencer": "Illumina", "organism": "Human"})
-    metadata_json: Optional[str] = Field(default="{}", description="JSON string of metadata") 
-
-class File(FileBase, table=True):
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    s3_key: str = Field(unique=True)  # MinIO 中的实际路径
-    project_id: uuid.UUID = Field(foreign_key="project.id")
-    uploaded_at: datetime = Field(default_factory=datetime.utcnow)
-    
-    project: Optional[Project] = Relationship(back_populates="files")
-
-class FileCreate(FileBase):
-    project_id: uuid.UUID
-    s3_key: str
+    is_public: bool

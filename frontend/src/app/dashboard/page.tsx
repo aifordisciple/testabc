@@ -135,6 +135,14 @@ export default function Dashboard() {
             <p className="text-gray-400 mt-2">Manage your bioinformatics projects</p>
           </div>
           <div className="flex gap-4">
+            {/* 👇 新增：Admin 入口按钮 */}
+            <button 
+                onClick={() => router.push('/admin/workflows')}
+                className="bg-gray-800 hover:bg-gray-700 text-gray-300 px-4 py-2 rounded-lg text-sm font-medium border border-gray-700 transition-all"
+            >
+                ⚙️ Manage Workflows
+            </button>
+
             <input 
                 type="text" 
                 placeholder="Search projects..." 
@@ -150,6 +158,8 @@ export default function Dashboard() {
             </button>
           </div>
         </div>
+        
+        {/* ... (保留剩下的内容) ... */}
 
         {filteredProjects.length === 0 ? (
             <div className="text-center py-20 text-gray-600">
