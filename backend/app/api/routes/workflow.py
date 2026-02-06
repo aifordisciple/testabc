@@ -1,58 +1,181 @@
+# backend/app/api/routes/workflow.py
+
 from fastapi import APIRouter, Depends, HTTPException, Body
-from fastapi.responses import FileResponse
 from sqlmodel import Session, select
-from typing import List, Optional, Any
+from typing import List, Optional
 import uuid
 import os
 
 from app.core.db import get_session
 from app.api.deps import get_current_user
-from app.models.user import User, Project, Analysis, AnalysisCreate, AnalysisPublic, Sample, SampleSheet
-from app.services.workflow_service import workflow_service
+from app.models.user import (
+    User, Project, File,
+    SampleSheet, SampleSheetCreate, SampleSheetPublic,
+    Sample, SampleCreate, SamplePublic, SampleFileLink,
+    Analysis, AnalysisCreate, AnalysisPublic
+)
 from app.worker import run_workflow_task
+# 暂时不需要 workflow_service，直到第三阶段
 
 router = APIRouter()
 
-# === 样本相关 ===
+# =======================
+# Sample Sheet Management
+# =======================
 
-@router.get("/projects/{project_id}/samples", response_model=List[dict])
-def list_project_samples(
+@router.post("/projects/{project_id}/sample_sheets", response_model=SampleSheetPublic)
+def create_sample_sheet(
     project_id: uuid.UUID,
+    sheet_in: SampleSheetCreate,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    获取项目下所有样本 (跨所有 SampleSheet)
-    """
-    # 1. 验证项目
     project = session.get(Project, project_id)
     if not project or project.owner_id != current_user.id:
         raise HTTPException(404, "Project not found")
 
-    # 2. 查找该项目下的所有 SampleSheet
-    sheets = session.exec(select(SampleSheet).where(SampleSheet.project_id == project_id)).all()
-    if not sheets:
-        return []
+    sheet = SampleSheet(
+        name=sheet_in.name,
+        description=sheet_in.description,
+        project_id=project_id
+    )
+    session.add(sheet)
+    session.commit()
+    session.refresh(sheet)
+    return sheet
 
-    # 3. 查找所有样本
-    sheet_ids = [s.id for s in sheets]
-    samples = session.exec(select(Sample).where(Sample.sample_sheet_id.in_(sheet_ids))).all()
+@router.get("/projects/{project_id}/sample_sheets", response_model=List[SampleSheetPublic])
+def list_sample_sheets(
+    project_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = session.get(Project, project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(404, "Project not found")
     
-    # 返回前端需要的格式 (适配 SamplePublic 或简单 dict)
-    # 前端可能期待 files 列表，这里简单返回
-    result = []
-    for s in samples:
-        result.append({
-            "id": s.id,
-            "name": s.name,
-            "group": s.group,
-            "replicate": s.replicate,
-            "sample_sheet_id": s.sample_sheet_id
-            # 如果需要 files 详情，需额外查询加载
-        })
-    return result
+    sheets = session.exec(select(SampleSheet).where(SampleSheet.project_id == project_id)).all()
+    return sheets
 
-# === 分析任务相关 ===
+@router.delete("/sample_sheets/{sheet_id}")
+def delete_sample_sheet(
+    sheet_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    sheet = session.get(SampleSheet, sheet_id)
+    if not sheet:
+        raise HTTPException(404, "Sample sheet not found")
+    
+    project = session.get(Project, sheet.project_id)
+    if project.owner_id != current_user.id:
+        raise HTTPException(403, "Permission denied")
+
+    # 级联删除 Samples 会由数据库或 SQLModel 处理 (如果在 ORM 定义了 cascade)
+    # 这里的 cascade="all, delete" 定义在 User.py 中，SQLAlchemy 会处理
+    session.delete(sheet)
+    session.commit()
+    return {"status": "deleted"}
+
+# =======================
+# Sample Management
+# =======================
+
+@router.get("/sample_sheets/{sheet_id}/samples", response_model=List[SamplePublic])
+def list_sheet_samples(
+    sheet_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    sheet = session.get(SampleSheet, sheet_id)
+    if not sheet:
+         raise HTTPException(404, "Sample sheet not found")
+         
+    project = session.get(Project, sheet.project_id)
+    if project.owner_id != current_user.id:
+        raise HTTPException(403, "Permission denied")
+
+    samples = session.exec(select(Sample).where(Sample.sample_sheet_id == sheet_id)).all()
+    return samples
+
+@router.post("/sample_sheets/{sheet_id}/samples", response_model=SamplePublic)
+def add_sample(
+    sheet_id: uuid.UUID,
+    sample_in: SampleCreate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    添加样本并自动关联文件
+    """
+    sheet = session.get(SampleSheet, sheet_id)
+    if not sheet:
+        raise HTTPException(404, "Sample sheet not found")
+    
+    project = session.get(Project, sheet.project_id)
+    if project.owner_id != current_user.id:
+        raise HTTPException(403, "Permission denied")
+
+    # 1. 创建 Sample 记录
+    sample = Sample(
+        name=sample_in.name,
+        group=sample_in.group,
+        replicate=sample_in.replicate,
+        sample_sheet_id=sheet_id,
+        meta_json=sample_in.meta_json
+    )
+    session.add(sample)
+    session.commit()
+    session.refresh(sample)
+
+    # 2. 关联 R1 文件
+    r1_file = session.get(File, sample_in.r1_file_id)
+    if not r1_file:
+        raise HTTPException(400, "R1 file not found")
+    
+    link_r1 = SampleFileLink(sample_id=sample.id, file_id=r1_file.id, file_role="R1")
+    session.add(link_r1)
+
+    # 3. 关联 R2 文件 (可选)
+    if sample_in.r2_file_id:
+        r2_file = session.get(File, sample_in.r2_file_id)
+        if not r2_file:
+             raise HTTPException(400, "R2 file not found")
+        link_r2 = SampleFileLink(sample_id=sample.id, file_id=r2_file.id, file_role="R2")
+        session.add(link_r2)
+    
+    session.commit()
+    session.refresh(sample)
+    
+    return sample
+
+@router.delete("/samples/{sample_id}")
+def delete_sample(
+    sample_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    sample = session.get(Sample, sample_id)
+    if not sample:
+        raise HTTPException(404, "Sample not found")
+    
+    sheet = session.get(SampleSheet, sample.sample_sheet_id)
+    project = session.get(Project, sheet.project_id)
+    if project.owner_id != current_user.id:
+        raise HTTPException(403, "Permission denied")
+
+    # 手动删除关联表记录
+    links = session.exec(select(SampleFileLink).where(SampleFileLink.sample_id == sample_id)).all()
+    for link in links:
+        session.delete(link)
+
+    session.delete(sample)
+    session.commit()
+    return {"status": "deleted"}
+
+# =======================
+# Analysis Management
+# =======================
 
 @router.get("/projects/{project_id}/analyses", response_model=List[AnalysisPublic])
 def list_analyses(
@@ -81,19 +204,17 @@ def run_analysis(
     if not project or project.owner_id != current_user.id:
         raise HTTPException(404, "Project not found")
         
-    # 创建记录
     analysis = Analysis(
         project_id=project_id,
         workflow=payload.workflow,
         params_json=payload.params_json,
         status="pending",
-        sample_sheet_id=payload.sample_sheet_id # 如果指定了
+        sample_sheet_id=payload.sample_sheet_id
     )
     session.add(analysis)
     session.commit()
     session.refresh(analysis)
     
-    # 异步调用 Celery
     run_workflow_task.delay(str(analysis.id))
     
     return analysis
@@ -127,9 +248,9 @@ def get_analysis_report(
     if not analysis:
         raise HTTPException(404, "Analysis not found")
         
-    # 路径规则：workspace/{id}/results/multiqc/multiqc_report.html
+    # 临时硬编码路径，后续在 service 中统一
     report_path = os.path.join(
-        workflow_service.base_work_dir, 
+        "/data/workspace",  # 假设的基础路径，需与 worker 一致
         str(analysis.id), 
         "results", "multiqc", "multiqc_report.html"
     )

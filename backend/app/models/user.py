@@ -49,7 +49,7 @@ class Token(SQLModel):
     token_type: str
 
 # =======================
-# 2. 样本表/实验单模型 (SampleSheet) - 新增
+# 2. 样本表/实验单模型 (SampleSheet)
 # =======================
 class SampleSheetBase(SQLModel):
     name: str = Field(index=True)
@@ -61,7 +61,7 @@ class SampleSheet(SampleSheetBase, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     project: "Project" = Relationship(back_populates="sample_sheets")
-    samples: List["Sample"] = Relationship(back_populates="sample_sheet")
+    samples: List["Sample"] = Relationship(back_populates="sample_sheet", sa_relationship_kwargs={"cascade": "all, delete"})
     analyses: List["Analysis"] = Relationship(back_populates="sample_sheet")
 
 class SampleSheetCreate(SampleSheetBase):
@@ -87,7 +87,7 @@ class Project(ProjectBase, table=True):
     owner: Optional[User] = Relationship(back_populates="projects")
     files: List["File"] = Relationship(back_populates="projects", link_model=ProjectFileLink)
     
-    sample_sheets: List[SampleSheet] = Relationship(back_populates="project")
+    sample_sheets: List[SampleSheet] = Relationship(back_populates="project", sa_relationship_kwargs={"cascade": "all, delete"})
     analyses: List["Analysis"] = Relationship(back_populates="project")
 
 class ProjectCreate(ProjectBase):
@@ -121,7 +121,7 @@ class File(FileBase, table=True):
     projects: List[Project] = Relationship(back_populates="files", link_model=ProjectFileLink)
     uploader: Optional[User] = Relationship(back_populates="uploaded_files")
     
-    # 样本关联：指向 Sample.files
+    # 样本关联
     samples: List["Sample"] = Relationship(back_populates="files", link_model=SampleFileLink)
 
 class FileCreate(FileBase):
@@ -131,9 +131,11 @@ class FileCreate(FileBase):
 
 class FilePublic(FileBase):
     id: uuid.UUID
+    filename: str
     s3_key: Optional[str]
     uploaded_at: datetime
     parent_id: Optional[uuid.UUID]
+    is_directory: bool
 
 # =======================
 # 5. 样本模型 (Sample)
@@ -146,18 +148,16 @@ class SampleBase(SQLModel):
 
 class Sample(SampleBase, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    
     sample_sheet_id: uuid.UUID = Field(foreign_key="samplesheet.id")
-    
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     sample_sheet: SampleSheet = Relationship(back_populates="samples")
     
-    # 🔧 修正：back_populates 必须指向 File 模型中定义的属性名 "samples"
+    # 指向 File.samples
     files: List[File] = Relationship(back_populates="samples", link_model=SampleFileLink)
 
 class SampleCreate(SampleBase):
-    sample_sheet_id: uuid.UUID
+    # 只需要传 R1/R2 的 ID，后端自动建立 SampleFileLink
     r1_file_id: uuid.UUID
     r2_file_id: Optional[uuid.UUID] = None
 
@@ -201,3 +201,4 @@ class AnalysisPublic(AnalysisBase):
     status: str
     start_time: datetime
     sample_sheet_id: Optional[uuid.UUID]
+    workflow: str

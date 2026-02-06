@@ -25,18 +25,22 @@ Channel
 process FASTQC {
     tag "$sample_id"
     publishDir "${params.outdir}/fastqc", mode: 'copy'
-    // 使用 Biocontainers 镜像
     container 'quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0'
 
     input:
     tuple val(sample_id), path(reads)
 
+    // ⚠️ 修改：输出整个文件夹，利用 sample_id 隔离命名空间
     output:
-    path "*_fastqc.{zip,html}", emit: fastqc_results
+    path "${sample_id}_fastqc", emit: fastqc_results
 
     script:
     """
-    fastqc -q ${reads}
+    # 创建以样本名命名的目录
+    mkdir ${sample_id}_fastqc
+    
+    # -o 指定输出目录
+    fastqc -o ${sample_id}_fastqc -q ${reads}
     """
 }
 
@@ -46,13 +50,15 @@ process MULTIQC {
     container 'quay.io/biocontainers/multiqc:1.19--pyhdfd78af_0'
 
     input:
-    path '*' // 收集所有 FastQC 输出
+    path '*' // 收集所有输入（现在是多个文件夹）
 
     output:
     path "multiqc_report.html"
+    path "multiqc_data"
 
     script:
     """
+    # MultiQC 会递归扫描当前目录下的所有子文件夹
     multiqc .
     """
 }

@@ -3,6 +3,8 @@
 import { useState, useEffect, use } from 'react';
 import { useRouter } from 'next/navigation';
 import UploadModal from '@/components/UploadModal';
+import SampleManager from '@/components/SampleManager';
+import AnalysisManager from '@/components/AnalysisManager'; // 👈 引入 AnalysisManager
 
 // === 类型定义 ===
 interface FileData {
@@ -34,7 +36,7 @@ function LinkProjectModal({ fileId, currentProjectId, onClose, onSuccess }: any)
   useEffect(() => {
     const fetchProjects = async () => {
       const token = localStorage.getItem('token');
-      // ✅ 修复：给 apiUrl 默认值，防止 TS 报错
+      // ✅ 修复：添加默认值防止 TS 报错
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
       const res = await fetch(`${apiUrl}/projects`, { 
         headers: { Authorization: `Bearer ${token}` }
@@ -109,6 +111,11 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   
   // 状态管理
   const [project, setProject] = useState<ProjectDetail | null>(null);
+  
+  // Tab 状态: 'files' | 'workflow'
+  const [activeTab, setActiveTab] = useState<'files' | 'workflow'>('files');
+
+  // File View States
   const [files, setFiles] = useState<FileData[]>([]);
   const [breadcrumbs, setBreadcrumbs] = useState<Breadcrumb[]>([]);
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
@@ -121,6 +128,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const fetchData = async () => {
     try {
       const token = localStorage.getItem('token');
+      // ✅ 修复：添加默认值
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
       
       // 1. 项目详情 (仅首次加载)
@@ -132,15 +140,17 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         setProject(await resProj.json());
       }
 
-      // 2. 文件列表 (带 folder_id)
-      let url = `${apiUrl}/files/projects/${projectId}/files`;
-      if (currentFolderId) url += `?folder_id=${currentFolderId}`;
-      
-      const resFiles = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      if (resFiles.ok) {
-        const data = await resFiles.json();
-        setFiles(data.files);
-        setBreadcrumbs(data.breadcrumbs);
+      // 2. 文件列表 (仅在 Files Tab 下加载)
+      if (activeTab === 'files') {
+          let url = `${apiUrl}/files/projects/${projectId}/files`;
+          if (currentFolderId) url += `?folder_id=${currentFolderId}`;
+          
+          const resFiles = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+          if (resFiles.ok) {
+            const data = await resFiles.json();
+            setFiles(data.files);
+            setBreadcrumbs(data.breadcrumbs);
+          }
       }
     } catch (error) {
       console.error(error);
@@ -149,14 +159,13 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
     }
   };
 
-  // 目录切换时重新加载
+  // 目录切换 或 Tab 切换时重新加载
   useEffect(() => {
     fetchData();
-  }, [currentFolderId]);
+  }, [currentFolderId, activeTab]);
 
   // === 操作 Handlers ===
 
-  // 新建文件夹
   const handleCreateFolder = async () => {
     const name = prompt("Folder Name:");
     if (!name) return;
@@ -164,7 +173,6 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
       
-      // 注意 API 路径中的 files 前缀
       let url = `${apiUrl}/files/projects/${projectId}/folders?folder_name=${encodeURIComponent(name)}`;
       if (currentFolderId) url += `&parent_id=${currentFolderId}`;
 
@@ -183,7 +191,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const handleDownload = async (fileId: string) => {
     try {
       const token = localStorage.getItem('token');
-      // ✅ 修复：给默认值，防止 'undefined' 报错
+      // ✅ 修复：添加默认值
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
       
       const res = await fetch(`${apiUrl}/files/files/${fileId}/download`, {
@@ -192,11 +200,6 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
       
       if (res.ok) {
         const { download_url } = await res.json();
-        // download_url 是相对路径 /api/v1/files/download_proxy/...
-        
-        // 方案 A: 使用 API URL 的域名 + 端口 (更稳健)
-        // 假设 apiUrl 是 http://113.44.66.210:8000/api/v1
-        // replace 后变成 http://113.44.66.210:8000
         const baseUrl = apiUrl.replace(/\/api\/v1\/?$/, '');
         const fullUrl = `${baseUrl}${download_url}`;
         
@@ -276,126 +279,160 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
       </nav>
 
       <main className="max-w-7xl mx-auto p-8">
-        <div className="flex justify-between items-start mb-6">
+        
+        {/* Header & Tabs */}
+        <div className="flex justify-between items-end mb-6 border-b border-gray-800 pb-1">
           <div>
-            <h2 className="text-3xl font-bold mb-2">Project Data</h2>
-            <p className="text-gray-400 max-w-2xl text-sm">{project?.description || 'No description'}</p>
+            <h2 className="text-3xl font-bold mb-2">Project Workspace</h2>
+            <div className="flex gap-6 mt-6">
+                <button 
+                  onClick={() => setActiveTab('files')}
+                  className={`pb-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'files' ? 'border-blue-500 text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`}
+                >
+                    Files
+                </button>
+                <button 
+                  onClick={() => setActiveTab('workflow')}
+                  className={`pb-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'workflow' ? 'border-blue-500 text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`}
+                >
+                    Samples & Workflow
+                </button>
+            </div>
           </div>
-          <div className="flex gap-3">
-             <button onClick={handleCreateFolder} className="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-700 transition-colors">
-                + New Folder
-             </button>
-             <button onClick={() => setShowUpload(true)} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg shadow-lg shadow-blue-900/20 transition-colors">
-                + Upload Data
-             </button>
-          </div>
-        </div>
-
-        {/* 面包屑导航 */}
-        <div className="flex items-center gap-2 text-sm text-gray-400 mb-4 bg-gray-900/50 p-3 rounded-lg border border-gray-800">
-           <span 
-             className={`cursor-pointer hover:text-white hover:underline ${!currentFolderId ? 'font-bold text-white' : ''}`}
-             onClick={() => setCurrentFolderId(null)}
-           >
-             Root
-           </span>
-           {breadcrumbs.map((b) => (
-             <div key={b.id} className="flex items-center gap-2">
-               <span>/</span>
-               <span 
-                 className={`cursor-pointer hover:text-white hover:underline ${currentFolderId === b.id ? 'font-bold text-white' : ''}`}
-                 onClick={() => setCurrentFolderId(b.id)}
-               >
-                 {b.name}
-               </span>
+          
+          {/* File Tab Specific Actions */}
+          {activeTab === 'files' && (
+             <div className="flex gap-3 mb-2">
+                <button onClick={handleCreateFolder} className="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-700 transition-colors text-sm">
+                    + New Folder
+                </button>
+                <button onClick={() => setShowUpload(true)} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg shadow-lg shadow-blue-900/20 transition-colors text-sm">
+                    + Upload Data
+                </button>
              </div>
-           ))}
+          )}
         </div>
 
-        {/* 文件列表 */}
-        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden shadow-xl">
-            <table className="w-full text-left">
-              <thead className="bg-gray-800/50 text-gray-400 text-xs uppercase">
-                <tr>
-                  <th className="px-6 py-3 font-medium">Name</th>
-                  <th className="px-6 py-3 font-medium">Size</th>
-                  <th className="px-6 py-3 font-medium">Type</th>
-                  <th className="px-6 py-3 font-medium">Date</th>
-                  <th className="px-6 py-3 font-medium text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-800">
-                {files.length === 0 && (
-                   <tr><td colSpan={5} className="p-8 text-center text-gray-500">此文件夹为空</td></tr>
-                )}
-                
-                {files.map((file) => (
-                  <tr key={file.id} className="hover:bg-gray-800/50 transition-colors group">
-                    <td className="px-6 py-4 font-medium text-white">
-                      <div 
-                        className={`flex items-center gap-3 ${file.is_directory ? 'cursor-pointer' : ''}`}
-                        onClick={() => file.is_directory && setCurrentFolderId(file.id)}
-                      >
-                        {file.is_directory ? (
-                          <svg className="w-6 h-6 text-yellow-500" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" /></svg>
-                        ) : (
-                          <svg className="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-                        )}
-                        <span className={`${file.is_directory ? 'font-bold text-yellow-500 hover:underline' : ''}`}>
-                           {file.filename}
+        {/* Tab Content */}
+        {activeTab === 'files' ? (
+            <>
+                 {/* 面包屑导航 */}
+                <div className="flex items-center gap-2 text-sm text-gray-400 mb-4 bg-gray-900/50 p-3 rounded-lg border border-gray-800">
+                    <span 
+                        className={`cursor-pointer hover:text-white hover:underline ${!currentFolderId ? 'font-bold text-white' : ''}`}
+                        onClick={() => setCurrentFolderId(null)}
+                    >
+                        Root
+                    </span>
+                    {breadcrumbs.map((b) => (
+                        <div key={b.id} className="flex items-center gap-2">
+                        <span>/</span>
+                        <span 
+                            className={`cursor-pointer hover:text-white hover:underline ${currentFolderId === b.id ? 'font-bold text-white' : ''}`}
+                            onClick={() => setCurrentFolderId(b.id)}
+                        >
+                            {b.name}
                         </span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 text-gray-400 text-sm font-mono">{formatSize(file.size)}</td>
-                    <td className="px-6 py-4 text-gray-500 text-sm">{file.is_directory ? 'Folder' : file.content_type}</td>
-                    <td className="px-6 py-4 text-gray-500 text-sm">{new Date(file.uploaded_at).toLocaleDateString()}</td>
-                    
-                    <td className="px-6 py-4 text-right">
-                      <div className="flex justify-end gap-3 opacity-80 group-hover:opacity-100 transition-opacity">
-                        
-                        {!file.is_directory && (
-                          <button onClick={() => handleDownload(file.id)} className="text-blue-400 hover:text-blue-300 p-1" title="Download">
-                             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-                          </button>
+                        </div>
+                    ))}
+                </div>
+
+                {/* 文件列表 */}
+                <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden shadow-xl">
+                    <table className="w-full text-left">
+                    <thead className="bg-gray-800/50 text-gray-400 text-xs uppercase">
+                        <tr>
+                        <th className="px-6 py-3 font-medium">Name</th>
+                        <th className="px-6 py-3 font-medium">Size</th>
+                        <th className="px-6 py-3 font-medium">Type</th>
+                        <th className="px-6 py-3 font-medium">Date</th>
+                        <th className="px-6 py-3 font-medium text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-800">
+                        {files.length === 0 && (
+                        <tr><td colSpan={5} className="p-8 text-center text-gray-500">此文件夹为空</td></tr>
                         )}
                         
-                        {!file.is_directory && (
-                          <button onClick={() => setLinkTargetFileId(file.id)} className="text-emerald-400 hover:text-emerald-300 p-1" title="Share to Project">
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" /></svg>
-                          </button>
-                        )}
+                        {files.map((file) => (
+                        <tr key={file.id} className="hover:bg-gray-800/50 transition-colors group">
+                            <td className="px-6 py-4 font-medium text-white">
+                            <div 
+                                className={`flex items-center gap-3 ${file.is_directory ? 'cursor-pointer' : ''}`}
+                                onClick={() => file.is_directory && setCurrentFolderId(file.id)}
+                            >
+                                {file.is_directory ? (
+                                <svg className="w-6 h-6 text-yellow-500" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" /></svg>
+                                ) : (
+                                <svg className="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                )}
+                                <span className={`${file.is_directory ? 'font-bold text-yellow-500 hover:underline' : ''}`}>
+                                {file.filename}
+                                </span>
+                            </div>
+                            </td>
+                            <td className="px-6 py-4 text-gray-400 text-sm font-mono">{formatSize(file.size)}</td>
+                            <td className="px-6 py-4 text-gray-500 text-sm">{file.is_directory ? 'Folder' : file.content_type}</td>
+                            <td className="px-6 py-4 text-gray-500 text-sm">{new Date(file.uploaded_at).toLocaleDateString()}</td>
+                            
+                            <td className="px-6 py-4 text-right">
+                            <div className="flex justify-end gap-3 opacity-80 group-hover:opacity-100 transition-opacity">
+                                
+                                {!file.is_directory && (
+                                <button onClick={() => handleDownload(file.id)} className="text-blue-400 hover:text-blue-300 p-1" title="Download">
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                </button>
+                                )}
+                                
+                                {!file.is_directory && (
+                                <button onClick={() => setLinkTargetFileId(file.id)} className="text-emerald-400 hover:text-emerald-300 p-1" title="Share to Project">
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" /></svg>
+                                </button>
+                                )}
 
-                        <button onClick={() => handleRename(file.id, file.filename)} className="text-yellow-400 hover:text-yellow-300 p-1" title="Rename">
-                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-                        </button>
+                                <button onClick={() => handleRename(file.id, file.filename)} className="text-yellow-400 hover:text-yellow-300 p-1" title="Rename">
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                                </button>
 
-                        <button onClick={() => handleRemoveLink(file.id)} className="text-gray-400 hover:text-white p-1" title="Remove from Project">
-                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
-                        </button>
+                                <button onClick={() => handleRemoveLink(file.id)} className="text-gray-400 hover:text-white p-1" title="Remove from Project">
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                                </button>
 
-                        <button onClick={() => handleHardDelete(file.id, file.is_directory)} className="text-red-500 hover:text-red-400 p-1" title="Permanently Delete">
-                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-        </div>
+                                <button onClick={() => handleHardDelete(file.id, file.is_directory)} className="text-red-500 hover:text-red-400 p-1" title="Permanently Delete">
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                </button>
+                            </div>
+                            </td>
+                        </tr>
+                        ))}
+                    </tbody>
+                    </table>
+                </div>
+            </>
+        ) : (
+            // 🆕 样本与分析工作流组件 (垂直布局：上方是样本管理，下方是分析管理)
+            <div className="space-y-10">
+                <SampleManager projectId={projectId as string} />
+                
+                <div className="border-t border-gray-800 pt-8">
+                    <AnalysisManager projectId={projectId as string} />
+                </div>
+            </div>
+        )}
+
       </main>
 
-      {/* UploadModal: 使用正确的 showUpload 变量 */}
+      {/* UploadModal */}
       {showUpload && (
         <UploadModal 
            projectId={projectId as string}
-           currentFolderId={currentFolderId} // ✅ 使用正确的参数名
+           currentFolderId={currentFolderId} // ✅ 使用正确的 Props 名
            onClose={() => setShowUpload(false)} 
            onUploadSuccess={fetchData} 
         />
       )}
 
-      {/* 关联弹窗 */}
+      {/* LinkModal */}
       {linkTargetFileId && (
         <LinkProjectModal
           fileId={linkTargetFileId}

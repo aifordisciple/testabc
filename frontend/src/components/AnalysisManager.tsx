@@ -8,6 +8,12 @@ interface Analysis {
   status: string;
   start_time: string;
   end_time?: string;
+  sample_sheet_id?: string;
+}
+
+interface SampleSheet {
+  id: string;
+  name: string;
 }
 
 interface AnalysisManagerProps {
@@ -16,49 +22,80 @@ interface AnalysisManagerProps {
 
 export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
   const [analyses, setAnalyses] = useState<Analysis[]>([]);
+  const [sheets, setSheets] = useState<SampleSheet[]>([]);
+  
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  
+  const [showRunModal, setShowRunModal] = useState(false);
+  const [selectedSheetId, setSelectedSheetId] = useState('');
   
   const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
   const [logContent, setLogContent] = useState('');
 
+  // === 辅助函数：去除 ANSI 转义字符 ===
+  // 这能把 [32m, [K, [3A 等乱码全部替换为空字符串，只保留纯文本
+  const stripAnsi = (str: string) => {
+    // eslint-disable-next-line
+    return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
+  };
+
   const fetchAnalyses = async () => {
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/workflow/projects/${projectId}/analyses`, {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+      const res = await fetch(`${apiUrl}/workflow/projects/${projectId}/analyses`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (res.ok) setAnalyses(await res.json());
     } catch (e) { console.error(e); } finally { setLoading(false); }
   };
 
+  const fetchSheets = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+      const res = await fetch(`${apiUrl}/workflow/projects/${projectId}/sample_sheets`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSheets(data);
+        if (data.length > 0) setSelectedSheetId(data[0].id);
+      }
+    } catch (e) { console.error(e); }
+  };
+
   useEffect(() => {
     fetchAnalyses();
+    fetchSheets();
     const interval = setInterval(fetchAnalyses, 5000);
     return () => clearInterval(interval);
   }, [projectId]);
 
   const handleRun = async () => {
-    // ⚠️ 更改：默认使用 rnaseq_qc 流程
-    if (!confirm("Run 'RNA-seq QC' pipeline? (This may take a few minutes)")) return;
+    if (!selectedSheetId) return alert("Please select a sample sheet first.");
     setRunning(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/workflow/projects/${projectId}/analyses`, {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+      const res = await fetch(`${apiUrl}/workflow/projects/${projectId}/analyses`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           project_id: projectId,
-          workflow: "rnaseq_qc", // 👈 指定新流程
+          workflow: "rnaseq_qc",
+          sample_sheet_id: selectedSheetId,
           params_json: "{}"
         })
       });
-      
       if (res.ok) {
-        alert('Workflow submitted!');
+        alert('Workflow submitted successfully!');
+        setShowRunModal(false);
         fetchAnalyses();
       } else {
-        alert('Failed to submit workflow');
+        const err = await res.json();
+        alert(`Failed: ${err.detail}`);
       }
     } catch (e) { alert('Network error'); } finally { setRunning(false); }
   };
@@ -68,7 +105,8 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
     setLogContent('Loading logs...');
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/workflow/analyses/${id}/log`, {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+      const res = await fetch(`${apiUrl}/workflow/analyses/${id}/log`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (res.ok) {
@@ -78,19 +116,21 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
     } catch (e) { setLogContent('Network error'); }
   };
 
-  // ⚠️ 新增：打开报告
-  const handleViewReport = (id: string) => {
-    const token = localStorage.getItem('token');
-    // 使用 window.open 打开 API 地址，浏览器会自动展示 HTML
-    // 注意：如果 API 需要 Header 鉴权，直接 open 可能不行。
-    // 但我们的 API 如果是 GET 且是文件下载，通常可以用 URL query param 传 token (如果支持)，
-    // 或者在同域下依赖 Cookie。
-    // **简易方案**：这里我们假设直接访问，如果后端强制需要 Header Authorization，
-    // 图片/HTML预览通常比较麻烦。
-    // **生产环境做法**：前端 fetch blob -> createObjectURL -> open。
-    // 下面用 fetch blob 方案：
-    
-    window.open(`${process.env.NEXT_PUBLIC_API_URL}/workflow/analyses/${id}/report?token=${token}`, '_blank');
+  const handleViewReport = async (id: string) => {
+    try {
+        const token = localStorage.getItem('token');
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+        const res = await fetch(`${apiUrl}/workflow/analyses/${id}/report`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        if (res.ok) {
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            window.open(url, '_blank');
+        } else {
+            alert('Report not found or not ready.');
+        }
+    } catch (e) { alert('Error opening report'); }
   };
 
   const getStatusColor = (status: string) => {
@@ -112,13 +152,44 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
             <p className="text-gray-400 text-xs mt-1">Run bioinformatics pipelines on your samples.</p>
         </div>
         <button 
-          onClick={handleRun}
-          disabled={running}
-          className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-emerald-900/20 disabled:opacity-50 flex items-center gap-2"
+          onClick={() => setShowRunModal(true)}
+          className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-emerald-900/20 flex items-center gap-2"
         >
-          {running ? 'Submitting...' : '▶ Run RNA-seq QC'}
+          ▶ Run Analysis
         </button>
       </div>
+
+      {showRunModal && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+            <div className="bg-gray-900 p-6 rounded-xl border border-gray-700 w-96 shadow-xl">
+                <h3 className="text-lg font-bold text-white mb-4">Run RNA-Seq QC</h3>
+                <div className="mb-4">
+                    <label className="block text-xs text-gray-400 mb-1">Select Sample Sheet</label>
+                    {sheets.length > 0 ? (
+                        <select 
+                            className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white outline-none"
+                            value={selectedSheetId}
+                            onChange={(e) => setSelectedSheetId(e.target.value)}
+                        >
+                            {sheets.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                        </select>
+                    ) : (
+                        <div className="text-red-400 text-xs">No sample sheets found.</div>
+                    )}
+                </div>
+                <div className="flex justify-end gap-3 mt-6">
+                    <button onClick={() => setShowRunModal(false)} className="text-gray-400 hover:text-white text-sm">Cancel</button>
+                    <button 
+                        onClick={handleRun} 
+                        disabled={running || sheets.length === 0}
+                        className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded text-sm disabled:opacity-50"
+                    >
+                        {running ? 'Submitting...' : 'Run Now'}
+                    </button>
+                </div>
+            </div>
+        </div>
+      )}
 
       <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden mb-8">
         <table className="w-full text-left">
@@ -144,39 +215,24 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
                 <td className="px-6 py-4 text-gray-500">{new Date(a.start_time).toLocaleString()}</td>
                 <td className="px-6 py-4 text-right">
                     <button onClick={() => handleViewLog(a.id)} className="text-blue-400 hover:text-blue-300 mr-4">Logs</button>
-                    
-                    {/* 报告按钮 */}
                     {a.status === 'completed' && (
                         <button 
-                            onClick={() => {
-                                // 简单的打开方式 (需后端支持 Query Token 或 Cookie，
-                                // 为了简化演示，我们这里先尝试 fetch 方式)
-                                fetch(`${process.env.NEXT_PUBLIC_API_URL}/workflow/analyses/${a.id}/report`, {
-                                    headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-                                })
-                                .then(res => {
-                                    if(res.ok) return res.blob();
-                                    throw new Error('Report not found');
-                                })
-                                .then(blob => {
-                                    const url = window.URL.createObjectURL(blob);
-                                    window.open(url, '_blank');
-                                })
-                                .catch(err => alert(err.message));
-                            }} 
+                            onClick={() => handleViewReport(a.id)} 
                             className="text-emerald-400 hover:text-emerald-300 font-medium"
                         >
-                            View Report
+                            Report
                         </button>
                     )}
                 </td>
               </tr>
             ))}
+            {analyses.length === 0 && (
+                <tr><td colSpan={5} className="p-8 text-center text-gray-500">No analysis runs yet.</td></tr>
+            )}
           </tbody>
         </table>
       </div>
       
-      {/* 日志弹窗 (保持不变) */}
       {selectedLogId && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-8">
             <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-4xl h-[80vh] flex flex-col shadow-2xl">
@@ -185,7 +241,8 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
                     <button onClick={() => setSelectedLogId(null)} className="text-gray-400 hover:text-white">✕</button>
                 </div>
                 <div className="flex-1 p-4 overflow-auto bg-black rounded-b-xl">
-                    <pre className="text-xs text-green-400 font-mono whitespace-pre-wrap">{logContent}</pre>
+                    {/* ⚠️ 核心修改：使用 stripAnsi 处理日志内容 */}
+                    <pre className="text-xs text-green-400 font-mono whitespace-pre-wrap">{stripAnsi(logContent)}</pre>
                 </div>
             </div>
         </div>
