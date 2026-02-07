@@ -6,13 +6,17 @@ import toast from 'react-hot-toast';
 import WorkflowEditorModal from '@/components/WorkflowEditorModal';
 import ConfirmModal from '@/components/ConfirmModal';
 
+// 🛠️ 修复：确保接口包含所有新字段，与 WorkflowEditorModal 要求一致
 interface WorkflowTemplate {
   id: string;
   name: string;
   description: string;
   category: string;
   subcategory: string;
+  workflow_type: string; // 👈 必须有 (注意这里改回了 workflow_type 以匹配后端)
   script_path: string;
+  source_code: string;   // 👈 必须有
+  config_code: string;   // 👈 必须有
   params_schema: string;
   is_public: boolean;
   updated_at: string;
@@ -115,7 +119,7 @@ export default function AdminWorkflowsPage() {
               Workflow Management
             </h1>
             <p className="text-gray-400 mt-2 text-sm">
-              Configure analysis pipelines, tools, and their parameters.
+              Design, configure, and manage analysis pipelines.
             </p>
           </div>
           <div className="flex gap-3">
@@ -135,60 +139,68 @@ export default function AdminWorkflowsPage() {
         </div>
 
         {/* Content */}
-        <div className="space-y-8">
+        <div className="space-y-12">
           {Object.entries(groupedWorkflows).map(([category, items]) => (
             <div key={category}>
-              <h2 className="text-xl font-bold text-gray-300 mb-4 flex items-center gap-2">
-                <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
+              <h2 className="text-xl font-bold text-gray-300 mb-6 flex items-center gap-3">
+                <span className="w-2.5 h-2.5 bg-purple-500 rounded-full shadow-[0_0_10px_rgba(168,85,247,0.5)]"></span>
                 {category}
               </h2>
               <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
                 {items.map(wf => (
-                  <div key={wf.id} className="bg-gray-900 border border-gray-800 rounded-xl p-5 hover:border-gray-700 transition-all group">
-                    <div className="flex justify-between items-start mb-2">
-                      <span className="text-xs font-mono text-purple-400 bg-purple-900/20 px-2 py-1 rounded">
+                  <div key={wf.id} className="bg-gray-900/50 border border-gray-800 rounded-xl p-6 hover:border-purple-500/30 hover:bg-gray-900 transition-all group relative overflow-hidden">
+                    {/* Badge */}
+                    <div className="absolute top-0 right-0 p-4">
+                        <span className={`text-[10px] font-bold px-2 py-1 rounded border ${
+                            wf.workflow_type === 'MODULE' 
+                            ? 'text-blue-400 border-blue-900 bg-blue-900/10' 
+                            : 'text-emerald-400 border-emerald-900 bg-emerald-900/10'
+                        }`}>
+                            {wf.workflow_type}
+                        </span>
+                    </div>
+
+                    <div className="mb-4">
+                      <span className="text-xs font-mono text-purple-400/80 bg-purple-900/10 px-2 py-1 rounded">
                         {wf.subcategory || 'General'}
                       </span>
-                      <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button 
-                          onClick={() => handleEdit(wf)}
-                          className="text-gray-400 hover:text-blue-400"
-                          title="Edit"
-                        >
-                          ✎
-                        </button>
-                        <button 
-                          onClick={() => handleDeleteClick(wf)}
-                          className="text-gray-400 hover:text-red-400"
-                          title="Delete"
-                        >
-                          🗑
-                        </button>
-                      </div>
                     </div>
                     
-                    <h3 className="font-bold text-lg mb-1">{wf.name}</h3>
-                    <p className="text-gray-500 text-sm mb-4 line-clamp-2 h-10">
+                    <h3 className="font-bold text-lg mb-2 text-gray-100">{wf.name}</h3>
+                    <p className="text-gray-500 text-sm mb-6 line-clamp-2 h-10 leading-relaxed">
                       {wf.description || "No description provided."}
                     </p>
                     
-                    <div className="text-xs text-gray-600 font-mono flex flex-col gap-1">
-                      <div>Script: {wf.script_path}</div>
-                      <div>Updated: {new Date(wf.updated_at).toLocaleDateString()}</div>
+                    <div className="flex justify-between items-end border-t border-gray-800/50 pt-4">
+                        <div className="text-[10px] text-gray-600 font-mono">
+                            Last updated: {new Date(wf.updated_at).toLocaleDateString()}
+                        </div>
+                        
+                        <div className="flex gap-3">
+                            <button 
+                            onClick={() => handleEdit(wf)}
+                            className="text-gray-400 hover:text-white transition-colors"
+                            title="Edit"
+                            >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                            </button>
+                            <button 
+                            onClick={() => handleDeleteClick(wf)}
+                            className="text-gray-600 hover:text-red-400 transition-colors"
+                            title="Delete"
+                            >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                            </button>
+                        </div>
                     </div>
                   </div>
                 ))}
               </div>
             </div>
           ))}
-          
-          {workflows.length === 0 && (
-             <div className="text-center py-20 text-gray-600">No workflows found.</div>
-          )}
         </div>
       </div>
 
-      {/* Modals */}
       {isEditorOpen && (
         <WorkflowEditorModal 
           initialData={editingWorkflow}

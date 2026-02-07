@@ -28,10 +28,18 @@ class Settings(BaseSettings):
     MINIO_CONSOLE_PORT: int = 9001
     MINIO_BUCKET_NAME: str = "autonome"
 
-    # === Redis & Celery 配置 (新增) ===
+    # === Redis & Celery 配置 ===
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
     
+    # === LLM Configuration (新增) ===
+    # 默认值适配 Docker 环境下的 Ollama
+    # 如果 .env 文件中有定义，这里的值会被覆盖
+    LLM_PROVIDER: str = "ollama"
+    LLM_BASE_URL: str = "http://host.docker.internal:11434/v1"
+    LLM_MODEL: str = "deepseek-r1:30b"
+    LLM_API_KEY: str = "ollama"
+
     @property
     def CELERY_BROKER_URL(self) -> str:
         """生成 Celery Broker URL"""

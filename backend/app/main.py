@@ -7,7 +7,7 @@ from sqlmodel import select
 
 from app.core.config import settings
 from app.core.db import init_db, get_session
-from app.api.routes import auth, files, workflow, admin # 👈 1. 导入 admin
+from app.api.routes import auth, files, workflow, admin, ai  # 👈 1. 导入 ai
 from app.models.bio import WorkflowTemplate
 
 # === 数据预置 (Seeding) ===
@@ -89,6 +89,7 @@ app.include_router(files.router, prefix=f"{settings.API_V1_STR}/files", tags=["F
 app.include_router(workflow.router, prefix=f"{settings.API_V1_STR}/workflow", tags=["Workflow"])
 # 👇 3. 注册 Admin 路由
 app.include_router(admin.router, prefix=f"{settings.API_V1_STR}/admin", tags=["Admin"])
+app.include_router(ai.router, prefix=f"{settings.API_V1_STR}/ai", tags=["AI"]) # 👈 2. 注册 AI 路由
 
 @app.get("/")
 def root():

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 from typing import List, Optional
 import uuid
+from datetime import datetime
 
 from app.core.db import get_session
 from app.api.deps import get_current_user
@@ -17,10 +18,7 @@ from app.models.bio import (
 
 router = APIRouter()
 
-# 辅助函数：权限检查 (暂时允许所有登录用户，实际生产应检查 User.is_superuser)
 def check_admin(user: User):
-    # if not user.is_superuser:
-    #     raise HTTPException(403, "Admin permission required")
     pass
 
 @router.post("/workflows", response_model=WorkflowTemplatePublic)
@@ -31,7 +29,6 @@ def create_workflow_template(
 ):
     check_admin(current_user)
     
-    # 检查重名
     existing = session.exec(select(WorkflowTemplate).where(WorkflowTemplate.name == workflow_in.name)).first()
     if existing:
         raise HTTPException(400, "Workflow with this name already exists")
@@ -45,16 +42,31 @@ def create_workflow_template(
 @router.get("/workflows", response_model=List[WorkflowTemplatePublic])
 def list_workflow_templates(
     category: Optional[str] = None,
+    type: Optional[str] = None, 
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
     query = select(WorkflowTemplate)
     if category:
         query = query.where(WorkflowTemplate.category == category)
+    if type:
+        # ⚠️ 修复：使用 workflow_type
+        query = query.where(WorkflowTemplate.workflow_type == type)
     
-    # 按分类排序
-    query = query.order_by(WorkflowTemplate.category, WorkflowTemplate.subcategory, WorkflowTemplate.name)
+    # ⚠️ 修复：按 workflow_type 排序
+    query = query.order_by(WorkflowTemplate.workflow_type, WorkflowTemplate.category, WorkflowTemplate.name)
     return session.exec(query).all()
+
+@router.get("/workflows/{workflow_id}", response_model=WorkflowTemplatePublic)
+def get_workflow_template(
+    workflow_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    workflow = session.get(WorkflowTemplate, workflow_id)
+    if not workflow:
+        raise HTTPException(404, "Workflow not found")
+    return workflow
 
 @router.patch("/workflows/{workflow_id}", response_model=WorkflowTemplatePublic)
 def update_workflow_template(
@@ -72,7 +84,8 @@ def update_workflow_template(
     workflow_data = workflow_update.model_dump(exclude_unset=True)
     for key, value in workflow_data.items():
         setattr(workflow, key, value)
-        
+    
+    workflow.updated_at = datetime.utcnow()
     session.add(workflow)
     session.commit()
     session.refresh(workflow)
