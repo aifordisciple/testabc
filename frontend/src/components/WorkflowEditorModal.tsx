@@ -12,7 +12,7 @@ interface WorkflowTemplate {
   description?: string;
   category: string;
   subcategory?: string;
-  workflow_type: string; // 👈 修改这里
+  workflow_type: string;
   script_path: string;
   source_code: string;
   config_code: string;
@@ -23,12 +23,18 @@ interface WorkflowTemplate {
 
 interface WorkflowEditorModalProps {
   initialData?: WorkflowTemplate;
+  defaultType?: 'PIPELINE' | 'TOOL'; // 👈 新增：接收从列表页传来的默认类型
   onClose: () => void;
   onSave: () => void;
 }
 
-export default function WorkflowEditorModal({ initialData, onClose, onSave }: WorkflowEditorModalProps) {
+export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELINE', onClose, onSave }: WorkflowEditorModalProps) {
+  // 默认的 Nextflow 模板
   const DEFAULT_MAIN_NF = `nextflow.enable.dsl=2\n\nprocess SAY_HELLO {\n    script:\n    """\n    echo 'Hello World!'\n    """\n}\n\nworkflow {\n    SAY_HELLO()\n}`;
+  
+  // 👈 新增：默认的 Python 工具模板
+  const DEFAULT_TOOL_SCRIPT = `import argparse\nimport pandas as pd\n\ndef main():\n    parser = argparse.ArgumentParser(description='Custom Tool')\n    parser.add_argument('--input', type=str, required=True, help='Input file')\n    parser.add_argument('--output', type=str, default='output.tsv', help='Output file')\n    args = parser.parse_args()\n\n    # TODO: Add your logic here\n    print(f"Processing {args.input}...")\n\nif __name__ == '__main__':\n    main()`;
+  
   const DEFAULT_CONFIG = `docker.enabled = true`;
   const DEFAULT_SCHEMA = `{\n  "type": "object",\n  "properties": {}\n}`;
 
@@ -37,9 +43,9 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
     description: '',
     category: 'Analysis',
     subcategory: '',
-    workflow_type: 'PIPELINE', // 👈 修改默认值
-    script_path: 'custom_flow_' + Date.now(),
-    source_code: DEFAULT_MAIN_NF,
+    workflow_type: defaultType, // 👈 使用传入的默认类型
+    script_path: 'custom_script_' + Date.now(),
+    source_code: defaultType === 'TOOL' ? DEFAULT_TOOL_SCRIPT : DEFAULT_MAIN_NF, // 👈 动态模板
     config_code: DEFAULT_CONFIG,
     default_container: '',
     params_schema: DEFAULT_SCHEMA,
@@ -52,10 +58,13 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
   const [chatHistory, setChatHistory] = useState<Message[]>([
     { 
       role: 'system', 
-      content: 'Hello! I am your AI Workflow Architect. I can help you modify the code. Try "Add a CPUS parameter" or "Create a FastQC process".' 
+      content: defaultType === 'TOOL' 
+        ? 'Hello! I am your AI Tool Developer. Tell me what Python/R script you want to create (e.g., "Create a script to draw a heatmap from a CSV").' 
+        : 'Hello! I am your AI Workflow Architect. I can help you modify the code. Try "Add a CPUS parameter" or "Create a FastQC process".' 
     }
   ]);
 
+  // 初始化数据
   useEffect(() => {
     if (initialData) {
       setFormData({
@@ -63,10 +72,17 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
         source_code: initialData.source_code || DEFAULT_MAIN_NF,
         config_code: initialData.config_code || DEFAULT_CONFIG,
         params_schema: initialData.params_schema || DEFAULT_SCHEMA,
-        workflow_type: initialData.workflow_type || 'PIPELINE' // 👈 适配旧数据
+        workflow_type: initialData.workflow_type || 'PIPELINE'
       });
+    } else {
+        // 当新建时，如果 defaultType 改变，重置代码模板
+        setFormData(prev => ({
+            ...prev,
+            workflow_type: defaultType,
+            source_code: defaultType === 'TOOL' ? DEFAULT_TOOL_SCRIPT : DEFAULT_MAIN_NF
+        }));
     }
-  }, [initialData]);
+  }, [initialData, defaultType]);
 
   const handleChange = (field: keyof WorkflowTemplate, value: any) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -78,13 +94,18 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
         setJsonError("Invalid JSON");
       }
     }
+    
+    // 如果用户手动切换类型，动态改变默认代码（仅在代码未被大幅修改时，这里简单处理不覆盖已有代码，只变类型）
+    if (field === 'workflow_type' && value === 'TOOL' && activeTab === 'config') {
+        setActiveTab('code'); // Tool 模式没有 config，自动切回 code
+    }
   };
 
   const handleSave = async () => {
     if (!formData.name) return toast.error("Name is required");
     if (jsonError) return toast.error("Fix JSON errors in Parameters tab");
 
-    const loadingToast = toast.loading("Saving workflow...");
+    const loadingToast = toast.loading("Saving...");
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
@@ -133,7 +154,7 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
         },
         body: JSON.stringify({
           messages: newHistory.filter(m => m.role !== 'system'),
-          mode: formData.workflow_type, // 👈 传递 workflow_type
+          mode: formData.workflow_type, 
           current_code: formData.source_code 
         })
       });
@@ -174,7 +195,7 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
       onClick={() => setActiveTab(id)}
       className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
         activeTab === id 
-          ? 'border-blue-500 text-blue-400' 
+          ? formData.workflow_type === 'TOOL' ? 'border-orange-500 text-orange-400' : 'border-blue-500 text-blue-400' 
           : 'border-transparent text-gray-400 hover:text-white'
       }`}
     >
@@ -189,15 +210,16 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
         {/* Header */}
         <div className="px-4 py-3 border-b border-gray-800 flex justify-between items-center bg-[#18181b]">
           <div className="flex items-center gap-3">
-             <div className="bg-purple-600/20 p-2 rounded-lg">
-                <span className="text-2xl">✨</span>
+             <div className={`p-2 rounded-lg ${formData.workflow_type === 'TOOL' ? 'bg-orange-600/20' : 'bg-purple-600/20'}`}>
+                <span className="text-2xl">{formData.workflow_type === 'TOOL' ? '🛠️' : '✨'}</span>
              </div>
              <div>
                 <h3 className="text-lg font-bold text-white">
-                {initialData ? 'Edit Workflow' : 'AI Workflow Designer'}
+                {initialData ? 'Edit ' : 'Create '}
+                {formData.workflow_type === 'TOOL' ? 'Tool Script' : 'Workflow'}
                 </h3>
                 <p className="text-xs text-gray-500">
-                    Mode: <span className="text-blue-400 font-bold">{formData.workflow_type}</span> 
+                    Mode: <span className={`font-bold ${formData.workflow_type === 'TOOL' ? 'text-orange-400' : 'text-blue-400'}`}>{formData.workflow_type}</span> 
                     {formData.workflow_type === 'PIPELINE' && " (AI can see existing modules)"}
                 </p>
              </div>
@@ -208,7 +230,8 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
                 <TabBtn id="general" label="General" />
                 <TabBtn id="code" label="Code" />
                 <TabBtn id="params" label="Params" />
-                <TabBtn id="config" label="Config" />
+                {/* 👈 TOOL 模式下隐藏 Config 选项卡 */}
+                {formData.workflow_type !== 'TOOL' && <TabBtn id="config" label="Config" />}
              </div>
              
              <div className="h-6 w-px bg-gray-700 mx-2"></div>
@@ -227,7 +250,7 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
         {/* Main Body */}
         <div className="flex flex-1 overflow-hidden">
             
-            {/* Left: Chat Panel (35%) */}
+            {/* Left: Chat Panel */}
             <div className="w-[35%] min-w-[320px] h-full border-r border-gray-700">
                 <ChatPanel 
                     messages={chatHistory}  
@@ -236,7 +259,7 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
                 />
             </div>
 
-            {/* Right: Editor Area (65%) */}
+            {/* Right: Editor Area */}
             <div className="flex-1 bg-[#0d1117] h-full flex flex-col overflow-hidden relative">
                 
                 {/* General Tab */}
@@ -244,12 +267,12 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
                     <div className="p-8 max-w-2xl mx-auto w-full space-y-6 overflow-y-auto">
                         <div className="grid grid-cols-2 gap-6">
                             <div>
-                                <label className="block text-xs text-gray-400 mb-1">Workflow Name</label>
+                                <label className="block text-xs text-gray-400 mb-1">Name</label>
                                 <input 
                                     className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white"
                                     value={formData.name}
                                     onChange={e => handleChange('name', e.target.value)}
-                                    placeholder="e.g. FastQC Module"
+                                    placeholder={formData.workflow_type === 'TOOL' ? "e.g. Draw Heatmap" : "e.g. FastQC Module"}
                                 />
                             </div>
                             <div>
@@ -257,14 +280,15 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
                                 <select 
                                     className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white"
                                     value={formData.workflow_type}
-                                    onChange={e => handleChange('workflow_type', e.target.value)} // 👈 修改
+                                    onChange={e => handleChange('workflow_type', e.target.value)}
                                 >
                                     <option value="PIPELINE">Pipeline</option>
                                     <option value="MODULE">Module</option>
+                                    {/* 👈 下拉框增加 Tool 选项 */}
+                                    <option value="TOOL">Tool (Script)</option>
                                 </select>
                             </div>
                         </div>
-                        {/* ... description & category ... */}
                         <div>
                             <label className="block text-xs text-gray-400 mb-1">Description</label>
                             <textarea 
@@ -283,6 +307,7 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
                             >
                                 <option value="Analysis">Analysis</option>
                                 <option value="Utility">Utility</option>
+                                <option value="Visualization">Visualization</option>
                                 <option value="Custom">Custom</option>
                             </select>
                             </div>
@@ -302,12 +327,14 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
                 {activeTab === 'code' && (
                     <div className="flex-1 flex flex-col">
                         <div className="px-4 py-1 bg-[#1e1e1e] border-b border-gray-700 text-xs text-gray-500 flex justify-between">
-                            <span>main.nf</span>
+                            {/* 👈 动态显示文件名 */}
+                            <span>{formData.workflow_type === 'TOOL' ? 'script.py / script.R' : 'main.nf'}</span>
                             <span>{formData.source_code.length} chars</span>
                         </div>
                         <div className="flex-1 relative">
                              <CodeEditor 
-                                language="nextflow" 
+                                /* 👈 动态调整代码高亮，TOOL默认给python高亮 */
+                                language={formData.workflow_type === 'TOOL' ? 'python' : 'nextflow'} 
                                 value={formData.source_code} 
                                 onChange={val => handleChange('source_code', val || '')} 
                                 height="100%"
@@ -342,8 +369,8 @@ export default function WorkflowEditorModal({ initialData, onClose, onSave }: Wo
                     </div>
                 )}
 
-                 {/* Config Tab */}
-                 {activeTab === 'config' && (
+                 {/* Config Tab (仅 Pipeline/Module 可见) */}
+                 {activeTab === 'config' && formData.workflow_type !== 'TOOL' && (
                     <div className="flex-1 flex flex-col">
                         <div className="px-4 py-1 bg-[#1e1e1e] border-b border-gray-700 text-xs text-gray-500">nextflow.config</div>
                         <div className="flex-1 relative">

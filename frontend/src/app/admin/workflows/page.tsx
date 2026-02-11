@@ -6,17 +6,16 @@ import toast from 'react-hot-toast';
 import WorkflowEditorModal from '@/components/WorkflowEditorModal';
 import ConfirmModal from '@/components/ConfirmModal';
 
-// 🛠️ 修复：确保接口包含所有新字段，与 WorkflowEditorModal 要求一致
 interface WorkflowTemplate {
   id: string;
   name: string;
   description: string;
   category: string;
   subcategory: string;
-  workflow_type: string; // 👈 必须有 (注意这里改回了 workflow_type 以匹配后端)
+  workflow_type: string; 
   script_path: string;
-  source_code: string;   // 👈 必须有
-  config_code: string;   // 👈 必须有
+  source_code: string;   
+  config_code: string;   
   params_schema: string;
   is_public: boolean;
   updated_at: string;
@@ -30,6 +29,9 @@ export default function AdminWorkflowsPage() {
   // Modal states
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [editingWorkflow, setEditingWorkflow] = useState<WorkflowTemplate | undefined>(undefined);
+  
+  // 👈 新增：记录当前想要创建的类型，传递给 EditorModal
+  const [createType, setCreateType] = useState<'PIPELINE' | 'TOOL'>('PIPELINE');
   
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
@@ -63,7 +65,9 @@ export default function AdminWorkflowsPage() {
     fetchWorkflows();
   }, []);
 
-  const handleCreate = () => {
+  // 👈 修改：接受创建类型参数
+  const handleCreate = (type: 'PIPELINE' | 'TOOL') => {
+    setCreateType(type);
     setEditingWorkflow(undefined);
     setIsEditorOpen(true);
   };
@@ -116,10 +120,10 @@ export default function AdminWorkflowsPage() {
         <div className="flex justify-between items-center mb-8 border-b border-gray-800 pb-6">
           <div>
             <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">
-              Workflow Management
+              Workflow & Tools Management
             </h1>
             <p className="text-gray-400 mt-2 text-sm">
-              Design, configure, and manage analysis pipelines.
+              Design, configure, and manage analysis pipelines and custom tools.
             </p>
           </div>
           <div className="flex gap-3">
@@ -129,8 +133,15 @@ export default function AdminWorkflowsPage() {
             >
                 &larr; Back to Dashboard
             </button>
+            {/* 👈 新增：Create Tool 按钮 */}
             <button 
-              onClick={handleCreate}
+              onClick={() => handleCreate('TOOL')}
+              className="bg-orange-600 hover:bg-orange-500 text-white px-6 py-2 rounded-lg font-medium transition-all shadow-lg shadow-orange-900/20"
+            >
+              + Create Tool
+            </button>
+            <button 
+              onClick={() => handleCreate('PIPELINE')}
               className="bg-purple-600 hover:bg-purple-500 text-white px-6 py-2 rounded-lg font-medium transition-all shadow-lg shadow-purple-900/20"
             >
               + Create Workflow
@@ -154,6 +165,8 @@ export default function AdminWorkflowsPage() {
                         <span className={`text-[10px] font-bold px-2 py-1 rounded border ${
                             wf.workflow_type === 'MODULE' 
                             ? 'text-blue-400 border-blue-900 bg-blue-900/10' 
+                            : wf.workflow_type === 'TOOL' // 👈 新增：Tool 的专属橙色徽章
+                            ? 'text-orange-400 border-orange-900 bg-orange-900/10'
                             : 'text-emerald-400 border-emerald-900 bg-emerald-900/10'
                         }`}>
                             {wf.workflow_type}
@@ -204,6 +217,7 @@ export default function AdminWorkflowsPage() {
       {isEditorOpen && (
         <WorkflowEditorModal 
           initialData={editingWorkflow}
+          defaultType={createType} // 👈 传递给 Editor 以便知道初始模式
           onClose={() => setIsEditorOpen(false)}
           onSave={fetchWorkflows}
         />
