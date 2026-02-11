@@ -9,166 +9,200 @@ class LLMClient:
         self.provider = os.getenv("LLM_PROVIDER", "ollama")
         self.base_url = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")
         self.api_key = os.getenv("LLM_API_KEY", "ollama")
-        # 默认使用 deepseek-r1:32b
-        self.model = os.getenv("LLM_MODEL", "deepseek-r1:32b")
+        # 推荐使用 qwen2.5-coder:32b 或 deepseek-r1:32b
+        self.model = os.getenv("LLM_MODEL", "deepseek-r1:70b")
         
         self.client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key
         )
 
-    def _clean_think_block(self, text: str) -> str:
-        """移除 DeepSeek/Qwen 的 <think> 思考过程"""
-        # 移除成对的 think 标签
+    def _clean_response(self, text: str) -> str:
+        """清洗 DeepSeek <think> 标签"""
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-        # 移除只有开始标签的情况（防止截断导致残留）
         text = re.sub(r'<think>.*', '', text, flags=re.DOTALL)
         return text.strip()
 
-    def _extract_json(self, text: str) -> Dict[str, Any]:
+    def _generate_params_schema(self, nf_code: str) -> str:
         """
-        [修复版] JSON 提取器
-        修复了 NameError: name 'e' is not defined 的 bug
+        [参数提取引擎] 
+        从 Nextflow 代码中通过正则提取 `params.x = y`，自动生成 JSON Schema。
         """
-        # 1. 清洗
-        cleaned_text = self._clean_think_block(text)
+        properties = {}
         
-        # 2. 暴力寻找最外层大括号
-        start_idx = cleaned_text.find('{')
-        end_idx = cleaned_text.rfind('}')
+        # 正则逻辑：
+        # 1. 匹配行首(允许空格)的 params.变量名
+        # 2. 匹配 = 后的值
+        # 3. 忽略行尾注释 (// ...)
+        pattern = re.compile(r'^\s*params\.(\w+)\s*=\s*(.+?)\s*(?://.*)?$', re.MULTILINE)
+        
+        matches = pattern.findall(nf_code)
+        
+        for key, raw_val in matches:
+            # 清理值（去引号、空格）
+            val = raw_val.strip()
+            param_type = "string"
+            default_val = None
+            title = key.replace('_', ' ').title() # 将 snake_case 转为 Title Case
+            
+            # 智能推断类型
+            if val == 'null':
+                param_type = "string" # Nextflow null 通常用于待传入的文件路径
+                default_val = None
+            elif val == 'true' or val == 'false':
+                param_type = "boolean"
+                default_val = (val == 'true')
+            elif val.startswith("'") or val.startswith('"'):
+                param_type = "string"
+                default_val = val.strip("'\"")
+            elif val.isdigit():
+                param_type = "integer"
+                default_val = int(val)
+            else:
+                # 可能是复杂表达式或变量引用，默认为 string，保留原值
+                default_val = val
+            
+            properties[key] = {
+                "type": param_type,
+                "title": title,
+                "default": default_val
+            }
+            
+        schema = {
+            "type": "object",
+            "properties": properties,
+            "required": []
+        }
+        
+        return json.dumps(schema, indent=2)
 
-        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            json_str = cleaned_text[start_idx : end_idx + 1]
+    def _extract_code_block(self, text: str) -> Dict[str, Any]:
+        """
+        [Markdown 提取器 + 参数生成器]
+        """
+        clean_text = self._clean_response(text)
+        
+        # 1. 提取代码块
+        code_pattern = r'```(?:groovy|nextflow)?\s*\n(.*?)\n\s*```'
+        match = re.search(code_pattern, clean_text, re.DOTALL)
+        
+        if match:
+            extracted_code = match.group(1).strip()
+            explanation = re.sub(code_pattern, '', clean_text, flags=re.DOTALL).strip()
+            explanation = explanation[:200] + "..." if len(explanation) > 200 else explanation
+            
+            # 2. 自动生成 Schema (新增功能)
+            params_schema = self._generate_params_schema(extracted_code)
+            
+            return {
+                "main_nf": extracted_code,
+                "params_schema": params_schema, # ✅ 现在有值了
+                "description": "Generated via Markdown Extraction",
+                "explanation": explanation or "Code generated successfully."
+            }
         else:
-            print(f"❌ JSON Extract Failed. No curly braces found. Content start: {cleaned_text[:100]}...")
-            return self._error_fallback(cleaned_text, "No JSON object found (missing { })")
-
-        # 3. 尝试解析
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError as e:  # 👈 之前漏了 'as e'
-            print(f"⚠️ JSON Decode Error: {e}. Content snippet: {json_str[:100]}...")
-            # 返回错误信息给前端，而不是让后端崩溃
-            return self._error_fallback(json_str, f"Invalid JSON syntax: {str(e)}")
+            # 兜底逻辑
+            print(f"⚠️ No code block found. Raw text snippet: {clean_text[:50]}...")
+            
+            if "process " in clean_text or "workflow {" in clean_text:
+                # 尝试从纯文本中生成 Schema
+                params_schema = self._generate_params_schema(clean_text)
+                return {
+                    "main_nf": clean_text,
+                    "params_schema": params_schema, 
+                    "description": "Raw Text Fallback",
+                    "explanation": "AI did not use markdown blocks."
+                }
+            
+            return self._error_fallback(clean_text, "No markdown code block found (```groovy)")
 
     def _error_fallback(self, raw_text: str, error_msg: str) -> Dict[str, Any]:
-        """兜底返回，确保前端总是能收到数据"""
-        # 将错误信息包装成注释，写入 main_nf，这样用户在编辑器里能直接看到报错原因
-        safe_raw_text = raw_text.replace("*/", "* /") # 防止注释嵌套破坏
+        """错误兜底"""
+        safe_text = raw_text.replace("*/", "* /")
         return {
-            "main_nf": f"// AI GENERATION FAILED\n// Error: {error_msg}\n// Please try again.\n\n/* \nRAW AI OUTPUT:\n{safe_raw_text}\n*/", 
-            "params_schema": "{}", 
-            "description": "Error parsing AI response",
-            "explanation": f"AI did not return valid JSON. {error_msg}"
+            "main_nf": f"// GENERATION ERROR\n// {error_msg}\n\n/*\n{safe_text}\n*/",
+            "params_schema": "{}",
+            "description": "Error",
+            "explanation": error_msg
         }
 
     def _call_llm(self, messages: List[Dict[str, str]]) -> str:
-        """统一的 LLM 调用接口"""
         try:
-            print(f"🤖 Sending {len(messages)} messages to {self.model}...")
+            print(f"🤖 Sending request to {self.model}...")
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                temperature=0.1, # 低温度，越低越严谨
+                temperature=0.1, 
                 max_tokens=8192
             )
-            content = response.choices[0].message.content
-            print(f"✅ LLM Response received ({len(content)} chars).")
-            return content
+            return response.choices[0].message.content
         except Exception as e:
             print(f"❌ LLM API Error: {e}")
-            # 这里抛出异常会被 FastAPI 捕获为 500，导致前端报错
-            # 我们最好返回一个空的错误字符串，让上层处理
-            return "{}" 
+            return ""
 
     def _static_analysis(self, code: str) -> List[str]:
-        """本地静态分析规则"""
+        """本地静态规则"""
         errors = []
-
-        # 规则1: publishDir 位置
         if re.search(r'output\s*:[^}]*publishDir', code, re.DOTALL):
-            errors.append("SYNTAX ERROR: `publishDir` directive MUST be placed BEFORE `input:` or `output:` blocks.")
-
-        # 规则2: DSL1 def 定义
+            errors.append("SYNTAX ERROR: `publishDir` must be placed BEFORE `input:` or `output:` blocks.")
         if re.search(r'def\s+\w+\s*\(.*?\)\s*\{\s*process\s+', code, re.DOTALL):
             errors.append("DSL2 VIOLATION: Do NOT wrap `process` definitions inside Groovy functions.")
-
-        # 规则3: Script 内直接引用 params.index
         if re.search(r'--\w+\s+\$\{?params\.\w+(index|ref|genome|db)\w*\}?', code, re.IGNORECASE):
             errors.append("CONTAINER ERROR: Do not use `params.index` in script. Pass it as `input: path index`.")
-
         return errors
 
-    def generate_workflow(
-        self, 
-        messages: List[Dict[str, str]], 
-        mode: str = "MODULE",
-        available_modules: str = ""
-    ) -> Dict[str, Any]:
-        """
-        Agentic Workflow
-        """
-        
-        # === Step 1: Draft ===
+    def generate_workflow(self, messages: List[Dict[str, str]], mode: str = "MODULE", available_modules: str = "") -> Dict[str, Any]:
+        """Agentic Workflow"""
         print("🚀 Step 1: Drafting code...")
         draft_response = self._generate_draft(messages, mode, available_modules)
         
-        # 如果调用 LLM 失败（比如超时或没连上），draft_response 可能是 "{}"
-        if not draft_response or draft_response == "{}":
-             return self._error_fallback("", "LLM API connection failed or returned empty.")
+        if not draft_response:
+             return self._error_fallback("", "LLM Connection Failed")
 
-        current_json = self._extract_json(draft_response)
+        current_data = self._extract_code_block(draft_response)
         
-        # 如果 Draft 解析失败，直接返回，不进行后续修复
-        if current_json.get("main_nf", "").startswith("// AI GENERATION FAILED"):
-            return current_json
+        if current_data["main_nf"].startswith("// GENERATION ERROR"):
+            return current_data
 
         # === Step 2: Refine Loop ===
-        max_attempts = 2
-        for attempt in range(max_attempts):
-            code = current_json.get("main_nf", "")
+        for attempt in range(2):
+            code = current_data["main_nf"]
             detected_errors = self._static_analysis(code)
             
             if not detected_errors:
                 print("✅ Static Analysis passed.")
                 break 
             
-            print(f"⚠️ Step 2 (Attempt {attempt+1}/{max_attempts}): Found bugs: {detected_errors}")
+            print(f"⚠️ Step 2 (Attempt {attempt+1}): Found bugs: {detected_errors}")
             
-            refine_prompt = "Your previous code had CRITICAL ERRORS. Fix them and return strictly JSON:\n"
+            refine_prompt = "Your previous code had CRITICAL ERRORS:\n"
             for i, err in enumerate(detected_errors):
                 refine_prompt += f"{i+1}. {err}\n"
+            refine_prompt += "\nPlease rewrite the code in a ```groovy block."
             
-            current_json = self._refine_code(current_json, refine_prompt)
-            
-            # 如果修复过程中解析失败，停止尝试
-            if current_json.get("main_nf", "").startswith("// AI GENERATION FAILED"):
-                break
+            # Refine 后重新提取，也会重新生成 params_schema
+            current_data = self._refine_code(current_data, refine_prompt)
 
-        # === Step 3: Polish ===
-        # 只有当前代码正常时才进行润色
-        if not current_json.get("main_nf", "").startswith("// AI GENERATION FAILED"):
-            print("🧐 Step 3: Final polish...")
-            final_checklist = "Ensure `task.cpus` is used. Check .gz handling. Return STRICT JSON."
-            current_json = self._refine_code(current_json, final_checklist)
-        
-        return current_json
+        return current_data
 
     def _generate_draft(self, messages: List[Dict[str, str]], mode: str, available_modules: str) -> str:
         """Step 1 Prompt"""
-        backticks = "`" * 3
         
         base_prompt = """
 You are an expert Nextflow DSL2 Developer.
-Output STRICT JSON only.
+Please generate the Nextflow code.
 
-ANTI-PATTERNS:
-1. NO DSL1 Syntax (def process).
-2. NO publishDir inside output.
+FORMAT REQUIREMENT:
+1. Write the Nextflow code inside a ```groovy code block.
+2. Define parameters at the top using `params.name = value` syntax.
+3. DO NOT output JSON.
 """
+        backticks = "`" * 3
         
         if mode == "MODULE":
             template = backticks + "groovy" + """
+params.outdir = './results'
+
 process NAME {
     tag "$meta.id"
     label 'process_medium'
@@ -182,15 +216,18 @@ process NAME {
     tuple val(meta), path("*.bam"), emit: bam
 
     script:
-    def args = task.ext.args ?: ''
     \"\"\"
     tool_command --threads ${task.cpus} input output
     \"\"\"
 }
 """ + backticks
-            mode_instruction = f"MODE: MODULE. Create a single `process`. Follow this TEMPLATE:\n{template}"
+            mode_instruction = f"MODE: MODULE. Create a single `process`. Use this structure:\n{template}"
         else: 
             code_block = backticks + "groovy" + """
+// Define default parameters
+params.input = null
+params.outdir = './results'
+
 Channel.fromPath(params.input)
     .splitCsv(header:true)
     .map{ row ->
@@ -206,9 +243,9 @@ Channel.fromPath(params.input)
         msgs = [{"role": "system", "content": system_prompt}] + messages
         return self._call_llm(msgs)
 
-    def _refine_code(self, draft_json: Dict[str, Any], instructions: str) -> Dict[str, Any]:
+    def _refine_code(self, current_data: Dict[str, Any], instructions: str) -> Dict[str, Any]:
         """Refine Prompt"""
-        code_to_check = draft_json.get("main_nf", "")
+        code_to_check = current_data["main_nf"]
         backticks = "`" * 3
         
         refine_prompt = f"""
@@ -219,10 +256,10 @@ CURRENT CODE:
 {code_to_check}
 {backticks}
 
-Output VALID JSON with "main_nf" key.
+Return the FIXED code in a ```groovy block. Ensure `params` are defined at the top.
 """
         msgs = [{"role": "user", "content": refine_prompt}]
         response_text = self._call_llm(msgs)
-        return self._extract_json(response_text)
+        return self._extract_code_block(response_text)
 
 llm_client = LLMClient()
