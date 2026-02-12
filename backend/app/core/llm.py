@@ -7,8 +7,9 @@ from typing import Dict, Any, Optional, List
 class LLMClient:
     def __init__(self):
         self.provider = os.getenv("LLM_PROVIDER", "ollama")
-        self.base_url = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")
+        self.base_url = os.getenv("LLM_BASE_URL", "[http://host.docker.internal:11434/v1](http://host.docker.internal:11434/v1)")
         self.api_key = os.getenv("LLM_API_KEY", "ollama")
+        # 建议使用 qwen2.5-coder:32b，它对指令遵循和多语言支持最好
         self.model = os.getenv("LLM_MODEL", "qwen2.5-coder:32b")
         
         self.client = OpenAI(
@@ -17,107 +18,140 @@ class LLMClient:
         )
 
     def _clean_response(self, text: str) -> str:
-        """清洗 DeepSeek <think> 标签"""
+        """清洗 DeepSeek/Qwen 的 <think> 标签及其他无关内容"""
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
         text = re.sub(r'<think>.*', '', text, flags=re.DOTALL)
         return text.strip()
 
-    def _generate_params_schema(self, nf_code: str) -> str:
-        """从 Nextflow 代码提取参数生成 Schema"""
-        properties = {}
-        pattern = re.compile(r'^\s*params\.(\w+)\s*=\s*(.+?)\s*(?://.*)?$', re.MULTILINE)
-        matches = pattern.findall(nf_code)
+    def _detect_language_request(self, messages: List[Dict[str, str]]) -> str:
+        """
+        [智能语言探测]
+        从用户历史消息中推断目标语言。
+        """
+        combined_text = " ".join([m.get("content", "").lower() for m in messages])
         
-        for key, raw_val in matches:
-            val = raw_val.strip()
-            param_type = "string"
-            default_val = None
-            title = key.replace('_', ' ').title()
+        # 1. 显式 R 语言关键词
+        if any(kw in combined_text for kw in ["r script", "r language", "write r code", ".r file", "r code"]):
+            return "R"
             
-            if val == 'null':
-                param_type = "string"
-                default_val = None
-            elif val == 'true' or val == 'false':
-                param_type = "boolean"
-                default_val = (val == 'true')
-            elif val.startswith("'") or val.startswith('"'):
-                param_type = "string"
-                default_val = val.strip("'\"")
-            elif val.isdigit():
-                param_type = "integer"
-                default_val = int(val)
-            else:
-                default_val = val
-            
-            properties[key] = {
-                "type": param_type,
-                "title": title,
-                "default": default_val
-            }
-            
-        schema = {
-            "type": "object",
-            "properties": properties,
-            "required": []
-        }
-        return json.dumps(schema, indent=2)
+        # 2. R 语言特有的生信包/函数关键词 (隐式推断)
+        r_keywords = [
+            "pheatmap", "ggplot", "tidyverse", "deseq2", "seurat", "limma", 
+            "bioconductor", "complexheatmap", "shiny", "optparse"
+        ]
+        if any(kw in combined_text for kw in r_keywords):
+            return "R"
 
-    def _extract_code_block(self, text: str, mode: str) -> Dict[str, Any]:
-        """提取器：支持多语言代码块和可选的 JSON Schema 提取"""
+        # 3. 其他语言
+        if "perl" in combined_text:
+            return "Perl"
+        if "python" in combined_text or "pandas" in combined_text or "matplotlib" in combined_text:
+            return "Python"
+            
+        # 默认 Python
+        return "Python"
+
+    def _generate_params_schema(self, code: str) -> str:
+        """(Fallback) 尝试从代码文本中反向生成简单的 JSON Schema"""
+        # 这是一个简单的兜底策略，针对 Pipeline 模式
+        return json.dumps({
+            "type": "object",
+            "properties": {
+                "input": {"type": "string", "title": "Input File", "default": None},
+                "outdir": {"type": "string", "title": "Output Directory", "default": "./results"}
+            }
+        }, indent=2)
+
+    def _extract_code_block(self, text: str, mode: str, target_lang: str = "Python") -> Dict[str, Any]:
+        """
+        [强健的提取器 v3]
+        使用 target_lang 进行定向提取，彻底解决 Script 和 JSON 混淆的问题。
+        """
         clean_text = self._clean_response(text)
         
-        # 1. 提取主代码 (扩大支持范围: python, r, perl 等)
-        code_pattern = r'```(?:groovy|nextflow|python|r|perl|bash|sh)?\s*\n(.*?)\n\s*```'
-        match = re.search(code_pattern, clean_text, re.DOTALL)
+        # 提取所有 markdown 代码块: [(lang, content), (lang, content)...]
+        blocks = re.findall(r'```(\w*)\n(.*?)```', clean_text, re.DOTALL)
         
-        if match:
-            extracted_code = match.group(1).strip()
-            explanation = re.sub(code_pattern, '', clean_text, flags=re.DOTALL).strip()
-            
-            params_schema = "{}"
-            
-            # 2. 如果是 TOOL 模式，尝试从 AI 输出中提取 JSON Schema 代码块
-            if mode == "TOOL":
-                json_pattern = r'```json\s*\n(.*?)\n\s*```'
-                json_match = re.search(json_pattern, clean_text, re.DOTALL)
-                if json_match:
-                    try:
-                        # 验证是否为合法 JSON
-                        parsed = json.loads(json_match.group(1).strip())
-                        params_schema = json.dumps(parsed, indent=2)
-                    except json.JSONDecodeError:
-                        params_schema = "{}"
-                # 将 json 块从说明文字中移除
-                explanation = re.sub(json_pattern, '', explanation, flags=re.DOTALL).strip()
-            else:
-                # PIPELINE/MODULE 从代码自动反向提取
-                params_schema = self._generate_params_schema(extracted_code)
-            
-            explanation = explanation[:200] + "..." if len(explanation) > 200 else explanation
-            
-            return {
-                "main_nf": extracted_code,
-                "params_schema": params_schema,
-                "description": "Generated via Markdown Extraction",
-                "explanation": explanation or "Code generated successfully."
-            }
-        else:
-            print(f"⚠️ No code block found. Raw text snippet: {clean_text[:50]}...")
-            if "process " in clean_text or "workflow {" in clean_text or "import " in clean_text:
-                params_schema = self._generate_params_schema(clean_text) if mode != "TOOL" else "{}"
-                return {
+        main_code = ""
+        params_schema = "{}"
+        explanation = re.sub(r'```.*?```', '', clean_text, flags=re.DOTALL).strip()
+        explanation = explanation[:300] + "..." if len(explanation) > 300 else explanation
+
+        if not blocks:
+            # 兜底：如果没有 Markdown 标记，但文本看起来像代码
+            print("⚠️ No code blocks found.")
+            if mode != "TOOL" and ("process " in clean_text or "workflow {" in clean_text):
+                 return {
                     "main_nf": clean_text,
-                    "params_schema": params_schema, 
-                    "description": "Raw Text Fallback",
-                    "explanation": "AI did not use markdown blocks."
+                    "params_schema": self._generate_params_schema(clean_text),
+                    "description": "Raw extraction",
+                    "explanation": "No markdown blocks found."
                 }
-            
-            return self._error_fallback(clean_text, "No markdown code block found")
+            return self._error_fallback(clean_text, "No markdown code blocks (```) found.")
+
+        # === 策略：先找 JSON Schema，再找目标语言脚本 ===
+
+        # 1. 寻找 Parameters JSON Schema
+        for lang, content in blocks:
+            l = lang.strip().lower()
+            c = content.strip()
+            # 语言标记是 json，或者内容看起来非常像 JSON Schema (包含 "properties")
+            if l == 'json' or (c.startswith('{') and '"properties"' in c):
+                try:
+                    # 验证是否为合法 JSON
+                    json.loads(c)
+                    params_schema = c
+                    break # 找到 Schema，停止寻找
+                except:
+                    continue
+
+        # 2. 寻找 Main Script (根据 target_lang)
+        target_tag = target_lang.lower() # r, python, perl...
+        
+        # 2a. 优先匹配准确的语言标签 (e.g., ```r)
+        for lang, content in blocks:
+            l = lang.strip().lower()
+            if l == target_tag:
+                main_code = content
+                break
+        
+        # 2b. 如果没找到准确标签，尝试找通用脚本标签 (非 JSON)
+        if not main_code:
+            supported_langs = ['python', 'r', 'perl', 'bash', 'sh', 'groovy', 'nextflow']
+            for lang, content in blocks:
+                l = lang.strip().lower()
+                c = content.strip()
+                # 如果是支持的语言，且内容不等于刚才找到的 schema
+                if l in supported_langs and c != params_schema:
+                    main_code = content
+                    break
+        
+        # 2c. 终极兜底：找第一个不是 JSON Schema 的块
+        if not main_code:
+            for lang, content in blocks:
+                c = content.strip()
+                if c != params_schema and not (c.startswith('{') and '"properties"' in c):
+                    main_code = content
+                    break
+
+        # 3. 后处理：Pipeline 模式如果没有 Schema，尝试反向生成
+        if mode != "TOOL" and params_schema == "{}":
+             params_schema = self._generate_params_schema(main_code)
+
+        if not main_code:
+            return self._error_fallback(clean_text, f"Could not find a valid {target_lang} script block.")
+
+        return {
+            "main_nf": main_code,
+            "params_schema": params_schema,
+            "description": f"Generated {target_lang} Script",
+            "explanation": explanation or "Code generated successfully."
+        }
 
     def _error_fallback(self, raw_text: str, error_msg: str) -> Dict[str, Any]:
         safe_text = raw_text.replace("*/", "* /")
         return {
-            "main_nf": f"// GENERATION ERROR\n// {error_msg}\n\n/*\n{safe_text}\n*/",
+            "main_nf": f"# GENERATION ERROR\n# {error_msg}\n\n'''\n{safe_text}\n'''",
             "params_schema": "{}",
             "description": "Error",
             "explanation": error_msg
@@ -140,81 +174,114 @@ class LLMClient:
     def _static_analysis(self, code: str, mode: str) -> List[str]:
         """本地静态规则"""
         errors = []
-        # 工具代码 (Python/R) 不需要进行 Nextflow 的特有语法检查
         if mode in ["PIPELINE", "MODULE"]:
             if re.search(r'output\s*:[^}]*publishDir', code, re.DOTALL):
                 errors.append("SYNTAX ERROR: `publishDir` must be placed BEFORE `input:` or `output:` blocks.")
             if re.search(r'def\s+\w+\s*\(.*?\)\s*\{\s*process\s+', code, re.DOTALL):
                 errors.append("DSL2 VIOLATION: Do NOT wrap `process` definitions inside Groovy functions.")
-            if re.search(r'--\w+\s+\$\{?params\.\w+(index|ref|genome|db)\w*\}?', code, re.IGNORECASE):
-                errors.append("CONTAINER ERROR: Do not use `params.index` in script. Pass it as `input: path index`.")
         return errors
 
     def generate_workflow(self, messages: List[Dict[str, str]], mode: str = "MODULE", available_modules: str = "") -> Dict[str, Any]:
         """Agentic Workflow"""
-        print(f"🚀 Step 1: Drafting code for mode: {mode}...")
-        draft_response = self._generate_draft(messages, mode, available_modules)
+        
+        # 1. 动态检测用户想要的语言
+        target_lang = "Python" # 默认
+        if mode == "TOOL":
+            target_lang = self._detect_language_request(messages)
+            print(f"🎯 Detected Intent Language: {target_lang}")
+        elif mode == "MODULE" or mode == "PIPELINE":
+            target_lang = "Nextflow"
+
+        print(f"🚀 Step 1: Drafting code for mode: {mode} ({target_lang})...")
+        draft_response = self._generate_draft(messages, mode, available_modules, target_lang)
         
         if not draft_response:
              return self._error_fallback("", "LLM Connection Failed")
 
-        current_data = self._extract_code_block(draft_response, mode)
+        # 2. 提取时传入 target_lang，确保提取准确
+        current_data = self._extract_code_block(draft_response, mode, target_lang)
         
-        if current_data["main_nf"].startswith("// GENERATION ERROR"):
+        if current_data["main_nf"].startswith("# GENERATION ERROR"):
             return current_data
 
         # === Step 2: Refine Loop ===
-        for attempt in range(2):
-            code = current_data["main_nf"]
-            detected_errors = self._static_analysis(code, mode)
-            
-            if not detected_errors:
-                print("✅ Static Analysis passed.")
-                break 
-            
-            print(f"⚠️ Step 2 (Attempt {attempt+1}): Found bugs: {detected_errors}")
-            
-            refine_prompt = "Your previous code had CRITICAL ERRORS:\n"
-            for i, err in enumerate(detected_errors):
-                refine_prompt += f"{i+1}. {err}\n"
-            refine_prompt += "\nPlease rewrite the code in a markdown block."
-            
-            current_data = self._refine_code(current_data, refine_prompt, mode)
+        # 只有 Nextflow 代码需要静态检查，工具脚本通常靠 LLM 自己保证
+        if mode in ["PIPELINE", "MODULE"]:
+            for attempt in range(2):
+                code = current_data["main_nf"]
+                detected_errors = self._static_analysis(code, mode)
+                
+                if not detected_errors:
+                    print("✅ Static Analysis passed.")
+                    break 
+                
+                print(f"⚠️ Step 2 (Attempt {attempt+1}): Found bugs: {detected_errors}")
+                
+                refine_prompt = "Your previous code had CRITICAL ERRORS:\n"
+                for i, err in enumerate(detected_errors):
+                    refine_prompt += f"{i+1}. {err}\n"
+                refine_prompt += f"\nPlease rewrite the code in a ```{target_lang.lower()} block."
+                
+                # Refine 也要传入 target_lang
+                current_data = self._refine_code(current_data, refine_prompt, mode, target_lang)
 
         return current_data
 
-    def _generate_draft(self, messages: List[Dict[str, str]], mode: str, available_modules: str) -> str:
+    def _generate_draft(self, messages: List[Dict[str, str]], mode: str, available_modules: str, target_lang: str = "Python") -> str:
         backticks = "`" * 3
         
-        # 基础 Prompt
         base_prompt = """
 You are an expert Bioinformatics Developer.
-DO NOT output raw JSON for the entire response.
-
-ANTI-PATTERNS:
-1. NO DSL1 Syntax (def process) for Nextflow.
-2. NO publishDir inside output.
 """
         
         if mode == "TOOL":
-            # 针对工具的 Prompt，植入了你要求的“规范”、“注释”、“参数系统”、“TSV优先”等要求
-            template = backticks + "python\nimport argparse\nimport pandas as pd\n\ndef main():\n    # Initialize argument parser\n    parser = argparse.ArgumentParser(description='Your Tool Description')\n    parser.add_argument('--input', type=str, required=True, help='Input file')\n    parser.add_argument('--output', type=str, default='output.tsv', help='Output TSV file')\n    args = parser.parse_args()\n    \n    # Process data...\n\nif __name__ == '__main__':\n    main()\n" + backticks
-            mode_instruction = f"""MODE: TOOL (Standalone Script)
-TASK:
-- Create a standalone script (Python, R, or Perl) to perform data analysis, formatting, or visualization (e.g., Heatmap, Venn).
-- CODE QUALITY: MUST include highly detailed comments and program explanations. Retain all explanations when modifying code.
-- PARAMETERS: MUST use a robust parameter parsing system (e.g., `argparse` in Python, `optparse` in R). Support default values.
-- OUTPUT FORMAT: If outputting tables, prefer tab-separated TSV format.
+            # 动态生成 Prompt，防止 Python 干扰 R
+            lang_instruction = ""
+            if target_lang == "R":
+                lang_instruction = f"""
+- TARGET LANGUAGE: R
+- LIBRARY: Use `optparse` for argument parsing.
+- STRUCTURE Example:
+{backticks}r
+library(optparse)
+option_list = list(
+  make_option(c("-i", "--input"), type="character", default=NULL, help="input file", metavar="character"),
+  make_option(c("-o", "--output"), type="character", default="out.pdf", help="output file", metavar="character")
+)
+opt_parser = OptionParser(option_list=option_list)
+opt = parse_args(opt_parser)
+# Logic...
+{backticks}
+"""
+            else: # Python
+                lang_instruction = f"""
+- TARGET LANGUAGE: Python
+- LIBRARY: Use `argparse`.
+- STRUCTURE Example:
+{backticks}python
+import argparse
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', required=True)
+    args = parser.parse_args()
+if __name__ == '__main__':
+    main()
+{backticks}
+"""
 
-FORMAT REQUIREMENT:
-1. Write the script code inside a {backticks}python (or r, perl) block.
-2. You MUST ALSO generate a Draft-07 JSON Schema corresponding to your script's parameters inside a {backticks}json block. This schema will build the UI.
-Example structure:
-{template}
+            mode_instruction = f"""
+MODE: TOOL (Standalone Script)
+TASK: Create a production-grade {target_lang} script.
+
+CRITICAL OUTPUT RULES:
+1. You MUST output the script inside a ```{target_lang.lower()}``` block.
+2. You MUST output the JSON Schema for parameters inside a separate ```json``` block.
+
+{lang_instruction}
 """
         elif mode == "MODULE":
             template = backticks + "groovy\nparams.outdir = './results'\n\nprocess NAME {\n    tag \"$meta.id\"\n    label 'process_medium'\n    publishDir \"${params.outdir}/name\", mode: 'copy'\n\n    input:\n    tuple val(meta), path(reads)\n    path index \n\n    output:\n    tuple val(meta), path(\"*.bam\"), emit: bam\n\n    script:\n    \"\"\"\n    tool_command --threads ${task.cpus} input output\n    \"\"\"\n}\n" + backticks
-            mode_instruction = f"MODE: MODULE (Nextflow Process).\nCreate a single `process`. Define parameters at the top using `params.name = value`. Use this structure:\n{template}"
+            mode_instruction = f"MODE: MODULE (Nextflow Process).\nCreate a single `process`. Structure:\n{template}"
         else: 
             code_block = backticks + "groovy\n// Define default parameters\nparams.input = null\nparams.outdir = './results'\n\nChannel.fromPath(params.input)\n    .splitCsv(header:true)\n    .map{ row ->\n        def meta = [id: row.sample_id]\n        def reads = row.r2_path ? [file(row.r1_path), file(row.r2_path)] : [file(row.r1_path)]\n        return tuple(meta, reads)\n    }\n    .set { ch_input }\n" + backticks
             mode_instruction = f"MODE: PIPELINE (Nextflow Workflow).\nStart with standard input logic:\n{code_block}\nAvailable Modules:\n{available_modules}"
@@ -223,7 +290,7 @@ Example structure:
         msgs = [{"role": "system", "content": system_prompt}] + messages
         return self._call_llm(msgs)
 
-    def _refine_code(self, current_data: Dict[str, Any], instructions: str, mode: str) -> Dict[str, Any]:
+    def _refine_code(self, current_data: Dict[str, Any], instructions: str, mode: str, target_lang: str) -> Dict[str, Any]:
         code_to_check = current_data["main_nf"]
         backticks = "`" * 3
         
@@ -235,10 +302,10 @@ CURRENT CODE:
 {code_to_check}
 {backticks}
 
-Return the FIXED code in a proper markdown block.
+Return the FIXED code in a ```{target_lang.lower()}``` block.
 """
         msgs = [{"role": "user", "content": refine_prompt}]
         response_text = self._call_llm(msgs)
-        return self._extract_code_block(response_text, mode)
+        return self._extract_code_block(response_text, mode, target_lang)
 
 llm_client = LLMClient()

@@ -18,12 +18,20 @@ interface SampleSheet {
   name: string;
 }
 
+interface ProjectFile {
+  id: string;
+  filename: string;
+  s3_key: string;
+  is_directory: boolean;
+}
+
 interface WorkflowTemplate {
   id: string;
   name: string;
   category: string;
   script_path: string;
   params_schema: string;
+  workflow_type: string;
 }
 
 interface AnalysisManagerProps {
@@ -34,11 +42,13 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
   const [analyses, setAnalyses] = useState<Analysis[]>([]);
   const [sheets, setSheets] = useState<SampleSheet[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowTemplate[]>([]);
+  const [files, setFiles] = useState<ProjectFile[]>([]); 
   
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   
   const [showRunModal, setShowRunModal] = useState(false);
+  const [taskType, setTaskType] = useState<'PIPELINE' | 'TOOL'>('PIPELINE');
   
   const [selectedSheetId, setSelectedSheetId] = useState('');
   const [selectedWorkflowId, setSelectedWorkflowId] = useState('');
@@ -52,64 +62,57 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
     return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
   };
 
-  // 1. 数据加载逻辑 (移除在这里设置默认值的逻辑，防止闭包陷阱)
   const fetchData = async () => {
     try {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
       
-      // Load History
-      const resAna = await fetch(`${apiUrl}/workflow/projects/${projectId}/analyses`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      const resAna = await fetch(`${apiUrl}/workflow/projects/${projectId}/analyses`, { headers: { Authorization: `Bearer ${token}` }});
       if (resAna.ok) setAnalyses(await resAna.json());
 
-      // Load Sample Sheets
-      const resSheets = await fetch(`${apiUrl}/workflow/projects/${projectId}/sample_sheets`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (resSheets.ok) {
-          const data = await resSheets.json();
-          setSheets(data);
-      }
+      const resSheets = await fetch(`${apiUrl}/workflow/projects/${projectId}/sample_sheets`, { headers: { Authorization: `Bearer ${token}` }});
+      if (resSheets.ok) setSheets(await resSheets.json());
 
-      // Load Workflows
-      const resWf = await fetch(`${apiUrl}/admin/workflows`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (resWf.ok) {
-          const data = await resWf.json();
-          setWorkflows(data);
+      const resWf = await fetch(`${apiUrl}/admin/workflows`, { headers: { Authorization: `Bearer ${token}` }});
+      if (resWf.ok) setWorkflows(await resWf.json());
+      
+      const resFiles = await fetch(`${apiUrl}/files/projects/${projectId}/files?recursive=true`, { headers: { Authorization: `Bearer ${token}` }});
+      if (resFiles.ok) {
+          const data = await resFiles.json();
+          setFiles(data.files?.filter((f: ProjectFile) => !f.is_directory) || []);
       }
-
     } catch (e) { console.error(e); } finally { setLoading(false); }
   };
 
-  // 2. 轮询
   useEffect(() => {
     fetchData();
     const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
   }, [projectId]);
 
-  // 3. 独立 Effect：自动选择默认 Sample Sheet
-  // 只有当列表存在且当前未选择时才执行，避免覆盖用户的选择
   useEffect(() => {
-    if (sheets.length > 0 && !selectedSheetId) {
-      setSelectedSheetId(sheets[0].id);
-    }
+    if (sheets.length > 0 && !selectedSheetId) setSelectedSheetId(sheets[0].id);
   }, [sheets, selectedSheetId]);
 
-  // 4. 独立 Effect：自动选择默认 Workflow
+  const availableWorkflows = workflows.filter(w => w.workflow_type === taskType);
+
   useEffect(() => {
-    if (workflows.length > 0 && !selectedWorkflowId) {
-      setSelectedWorkflowId(workflows[0].id);
+    if (availableWorkflows.length > 0) {
+      if (!availableWorkflows.find(w => w.id === selectedWorkflowId)) {
+        setSelectedWorkflowId(availableWorkflows[0].id);
+      }
+    } else {
+      setSelectedWorkflowId('');
     }
-  }, [workflows, selectedWorkflowId]);
+  }, [availableWorkflows, selectedWorkflowId, taskType]);
 
   const handleRun = async () => {
-    if (!selectedSheetId || !selectedWorkflowId) {
-        toast.error("Please select a sample sheet and a workflow.");
+    if (taskType === 'PIPELINE' && !selectedSheetId) {
+        toast.error("Please select a sample sheet for the pipeline.");
+        return;
+    }
+    if (!selectedWorkflowId) {
+        toast.error("Please select a template.");
         return;
     }
     
@@ -123,19 +126,21 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
       const token = localStorage.getItem('token');
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
       
+      const payload = {
+        project_id: projectId,
+        workflow: wf.script_path, 
+        sample_sheet_id: taskType === 'PIPELINE' ? selectedSheetId : null,
+        params_json: JSON.stringify(params) // 👈 params 里现在包含了直接选中的文件路径
+      };
+
       const res = await fetch(`${apiUrl}/workflow/projects/${projectId}/analyses`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          project_id: projectId,
-          workflow: wf.script_path,
-          sample_sheet_id: selectedSheetId,
-          params_json: JSON.stringify(params)
-        })
+        body: JSON.stringify(payload)
       });
       
       if (res.ok) {
-        toast.success('Workflow submitted!', { id: loadingToast });
+        toast.success('Task submitted successfully!', { id: loadingToast });
         setShowRunModal(false);
         fetchData();
       } else {
@@ -201,73 +206,95 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
     <div>
       <div className="flex justify-between items-center mb-6">
         <div>
-            <h3 className="text-xl font-bold text-white">Analysis History</h3>
-            <p className="text-gray-400 text-xs mt-1">Run bioinformatics pipelines on your samples.</p>
+            <h3 className="text-xl font-bold text-white">Analysis & Tools</h3>
+            <p className="text-gray-400 text-xs mt-1">Run bioinformatics pipelines or standalone tools.</p>
         </div>
         <button 
           onClick={() => setShowRunModal(true)}
           className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-emerald-900/20 flex items-center gap-2"
         >
-          ▶ Run New Analysis
+          ▶ Run New Task
         </button>
       </div>
 
       {showRunModal && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
             <div className="bg-gray-900 p-6 rounded-xl border border-gray-700 w-full max-w-lg shadow-2xl max-h-[90vh] overflow-y-auto flex flex-col">
-                <h3 className="text-lg font-bold text-white mb-6 border-b border-gray-800 pb-2">Start Analysis</h3>
+                <h3 className="text-lg font-bold text-white mb-4 border-b border-gray-800 pb-2">Start a New Task</h3>
                 
                 <div className="space-y-6 flex-1">
-                    {/* 1. Select Workflow */}
+                    {/* 0. 任务类型切换 */}
+                    <div className="flex gap-4 p-1 bg-gray-800 rounded-lg">
+                        <button 
+                            className={`flex-1 py-2 text-sm font-bold rounded-md transition-colors ${taskType === 'PIPELINE' ? 'bg-purple-600 text-white shadow-md' : 'text-gray-400 hover:text-white'}`}
+                            onClick={() => setTaskType('PIPELINE')}
+                        >
+                            🔗 Pipeline (流程)
+                        </button>
+                        <button 
+                            className={`flex-1 py-2 text-sm font-bold rounded-md transition-colors ${taskType === 'TOOL' ? 'bg-orange-600 text-white shadow-md' : 'text-gray-400 hover:text-white'}`}
+                            onClick={() => setTaskType('TOOL')}
+                        >
+                            🛠️ Tool (工具)
+                        </button>
+                    </div>
+
+                    {/* 1. Select Template */}
                     <div>
-                        <label className="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">1. Select Pipeline</label>
-                        {workflows.length > 0 ? (
+                        <label className="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">
+                            1. Select {taskType === 'PIPELINE' ? 'Pipeline' : 'Tool'}
+                        </label>
+                        {availableWorkflows.length > 0 ? (
                             <select 
                                 className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white outline-none focus:border-blue-500 transition-colors"
                                 value={selectedWorkflowId}
                                 onChange={(e) => setSelectedWorkflowId(e.target.value)}
                             >
-                                {workflows.map(w => (
+                                {availableWorkflows.map(w => (
                                     <option key={w.id} value={w.id}>
                                         {w.category} / {w.name}
                                     </option>
                                 ))}
                             </select>
                         ) : (
-                            <div className="text-red-400 text-sm bg-red-900/20 p-2 rounded">No workflows available. Ask admin to create one.</div>
-                        )}
-                        {currentWorkflow?.name && (
-                            <p className="text-xs text-gray-500 mt-2 italic">{currentWorkflow.name}</p>
-                        )}
-                    </div>
-
-                    {/* 2. Select Sample Sheet */}
-                    <div>
-                        <label className="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">2. Select Data</label>
-                        {sheets.length > 0 ? (
-                            <select 
-                                className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white outline-none focus:border-blue-500 transition-colors"
-                                value={selectedSheetId}
-                                onChange={(e) => setSelectedSheetId(e.target.value)}
-                            >
-                                {sheets.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                            </select>
-                        ) : (
-                            <div className="text-yellow-500 text-sm bg-yellow-900/20 p-2 rounded">No sample sheets found. Create one in 'Samples' tab first.</div>
+                            <div className="text-red-400 text-sm bg-red-900/20 p-2 rounded">
+                                No {taskType.toLowerCase()}s available. Ask admin to create one.
+                            </div>
                         )}
                     </div>
 
-                    {/* 3. Configure Parameters (Dynamic) */}
+                    {/* 2. Select Sample Sheet (仅 Pipeline 模式显示) */}
+                    {taskType === 'PIPELINE' && (
+                        <div>
+                            <label className="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">2. Select Sample Sheet</label>
+                            {sheets.length > 0 ? (
+                                <select 
+                                    className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white outline-none focus:border-purple-500 transition-colors"
+                                    value={selectedSheetId}
+                                    onChange={(e) => setSelectedSheetId(e.target.value)}
+                                >
+                                    {sheets.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                </select>
+                            ) : (
+                                <div className="text-yellow-500 text-sm bg-yellow-900/20 p-2 rounded">No sample sheets found. Create one in 'Samples' tab first.</div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* 3. Configure Parameters */}
                     <div>
-                        <label className="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">3. Configure Parameters</label>
-                        <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                        <label className="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">
+                            {taskType === 'PIPELINE' ? '3' : '2'}. Configure Parameters
+                        </label>
+                        <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700 max-h-64 overflow-y-auto">
                             {currentWorkflow ? (
                                 <DynamicParamsForm 
                                     schemaStr={currentWorkflow.params_schema} 
                                     onChange={(vals) => setParams(vals)} 
+                                    uploadedFiles={files} /* 👈 将文件列表传给组件 */
                                 />
                             ) : (
-                                <div className="text-gray-500 text-sm">Select a workflow to configure parameters.</div>
+                                <div className="text-gray-500 text-sm">Select a template to configure parameters.</div>
                             )}
                         </div>
                     </div>
@@ -277,10 +304,10 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
                     <button onClick={() => setShowRunModal(false)} className="text-gray-400 hover:text-white text-sm px-3 py-2">Cancel</button>
                     <button 
                         onClick={handleRun} 
-                        disabled={running || workflows.length === 0 || sheets.length === 0}
+                        disabled={running || availableWorkflows.length === 0 || (taskType === 'PIPELINE' && sheets.length === 0)}
                         className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-2 rounded-lg text-sm font-medium shadow-lg shadow-emerald-900/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                     >
-                        {running ? 'Submitting...' : '🚀 Launch Analysis'}
+                        {running ? 'Submitting...' : '🚀 Launch Task'}
                     </button>
                 </div>
             </div>
@@ -293,7 +320,7 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
           <thead className="bg-gray-800/50 text-gray-400 text-xs uppercase">
             <tr>
               <th className="px-6 py-3 font-medium">ID</th>
-              <th className="px-6 py-3 font-medium">Pipeline</th>
+              <th className="px-6 py-3 font-medium">Task / Pipeline</th>
               <th className="px-6 py-3 font-medium">Status</th>
               <th className="px-6 py-3 font-medium">Date</th>
               <th className="px-6 py-3 font-medium text-right">Actions</th>
@@ -324,7 +351,7 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
               </tr>
             ))}
             {analyses.length === 0 && (
-                <tr><td colSpan={5} className="p-8 text-center text-gray-500">No analyses running yet.</td></tr>
+                <tr><td colSpan={5} className="p-8 text-center text-gray-500">No tasks running yet.</td></tr>
             )}
           </tbody>
         </table>
