@@ -58,7 +58,7 @@ export default function UploadModal({ projectId, currentFolderId, onClose, onUpl
   };
 
   return (
-    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-100">
       <div className="bg-gray-900 p-6 rounded-xl border border-gray-700 w-96 shadow-2xl">
         <h3 className="text-xl font-bold text-white mb-4">Upload File</h3>
         
