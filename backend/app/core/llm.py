@@ -64,45 +64,130 @@ class LLMClient:
 
     def generate_schema_from_code(self, code: str, mode: str) -> str:
         """
-        [新增] 从代码反向解析生成 JSON Schema
+        [升级版] 从代码反向解析生成 JSON Schema (Draft-07)
+        增强了对 R (optparse) 和 Python (argparse) 的解析能力，支持 Enum 和类型推断。
         """
         prompt = f"""
-You are a Code Analyzer. 
-Your task is to analyze the following Bioinformatics script/workflow and extract all input parameters/arguments into a JSON Schema (Draft-07).
+You are a Senior Bioinformatics Pipeline Engineer.
+Your task is to analyze the provided script code and generate a corresponding **Draft-07 JSON Schema** for its input parameters.
+This schema will be used to generate a Web UI form.
 
-MODE: {mode}
+### ANALYSIS STRATEGY:
 
-INSTRUCTIONS:
-1. If Python (argparse), look for `parser.add_argument('--name', ...)` and extract type/default/help.
-2. If R (optparse), look for `make_option(c('--name'), ...)` and extract type/default/help.
-3. If Nextflow, look for `params.name = val` definitions at the top.
+#### 1. Python Scripts (using `argparse`)
+- **Scan**: Look for `parser.add_argument(...)`.
+- **Name**: Extract `--name` (strip hyphens).
+- **Type Mapping**: 
+  - `type=str` -> `"string"`
+  - `type=int` -> `"integer"`
+  - `type=float` -> `"number"`
+  - `action='store_true'` -> `"boolean"` (and set `default: false`)
+- **Enum**: If `choices=[...]` is present, generate `"enum": [...]`.
+- **Default**: Extract `default=...` value.
+- **Required**: If `required=True` is set, add parameter name to `"required"` list.
 
-OUTPUT REQUIREMENT:
-- Output ONLY the raw JSON string of the schema.
-- Do NOT wrap in markdown blocks.
-- Do NOT add explanation.
+#### 2. R Scripts (using `optparse`)
+- **Scan**: Look for `make_option(c("-f", "--flag"), ...)`
+- **Name**: Extract long flag `--flag` (strip hyphens).
+- **Type Mapping**:
+  - `type="character"` -> `"string"`
+  - `type="integer"` -> `"integer"`
+  - `type="double"` or `type="numeric"` -> `"number"`
+  - `type="logical"` -> `"boolean"`
+  - `action="store_true"` -> `"boolean"`
+- **Default**: Extract `default=...` (handle `NULL` as null).
 
-CODE TO ANALYZE:
+#### 3. Nextflow
+- **Scan**: Look for `params.variable = value` at the top of the file.
+- **Type**: Infer from value (quote -> string, number -> number, true/false -> boolean).
+
+### OUTPUT RULES:
+1. Return **ONLY** the valid JSON string.
+2. The root object must have `"type": "object"` and `"properties"`.
+3. Include `"title"`, `"description"` and `"default"` fields where possible.
+
+### SOURCE CODE:
+{backticks}
 {code}
+{backticks}
 """
         messages = [{"role": "user", "content": prompt}]
-        response = self._call_llm(messages)
-        clean_text = self._clean_response(response)
         
-        # 尝试提取 JSON
-        # 有时候模型还是会加 ```json ... ```，这里做一个鲁棒提取
-        json_match = re.search(r'(\{.*\})', clean_text, re.DOTALL)
-        if json_match:
-            try:
-                # 验证解析
-                schema_str = json_match.group(1)
-                json.loads(schema_str) # 校验是否为合法 JSON
-                return schema_str
-            except:
-                pass
+        try:
+            print(f"🔍 [LLM] Analyzing code to extract schema ({self.model})...")
+            
+            # 尝试启用 JSON 模式 (增加确定性)
+            kwargs = {}
+            # 注意: 并非所有模型/代理都支持 response_format，这里做一个安全检查
+            # 如果你的 backend 确定支持 OpenAI 格式的 json_object，可以取消注释下面两行
+            # kwargs["response_format"] = {"type": "json_object"}
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.1, # 低温以保证逻辑严密
+                max_tokens=4096,
+                **kwargs
+            )
+            raw_text = response.choices[0].message.content
+        except Exception as e:
+            print(f"❌ LLM Error in generate_schema: {e}")
+            return json.dumps({"type": "object", "properties": {}}, indent=2)
+
+        # === 鲁棒的 JSON 提取逻辑 ===
+        clean_text = self._clean_response(raw_text)
         
-        # 如果正则提取失败，尝试直接返回清洗后的文本（假设只有 JSON）
-        return clean_text
+        # 1. 优先：尝试提取 Markdown 代码块中的 JSON
+        json_block = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', clean_text, re.DOTALL)
+        if json_block:
+            candidate = json_block.group(1)
+        else:
+            # 2. 兜底：利用堆栈匹配寻找最外层的合法 JSON 对象
+            # 这能解决 "Here is the json: { ... }" 这种混合文本的情况
+            candidate = ""
+            stack = 0
+            start_idx = -1
+            
+            for i, char in enumerate(clean_text):
+                if char == '{':
+                    if stack == 0:
+                        start_idx = i
+                    stack += 1
+                elif char == '}':
+                    stack -= 1
+                    if stack == 0 and start_idx != -1:
+                        # 找到闭合的 JSON 对象
+                        candidate = clean_text[start_idx : i+1]
+                        break 
+            
+            if not candidate:
+                candidate = clean_text # 如果没找到结构，尝试解析整个文本
+
+        # 3. 验证与修补
+        try:
+            schema = json.loads(candidate)
+            
+            # 确保基本结构完整
+            if not isinstance(schema, dict):
+                raise ValueError("Parsed JSON is not an object")
+            
+            if "type" not in schema:
+                schema["type"] = "object"
+            if "properties" not in schema:
+                schema["properties"] = {}
+            
+            # 修正一些常见的数据类型错误
+            for prop_name, prop_val in schema.get("properties", {}).items():
+                # 确保 enum 是列表
+                if "enum" in prop_val and not isinstance(prop_val["enum"], list):
+                    del prop_val["enum"]
+                
+            return json.dumps(schema, indent=2)
+            
+        except Exception as e:
+            print(f"⚠️ JSON Parse Failed. Raw snippet: {clean_text[:100]}... Error: {e}")
+            # 返回空 Schema 防止前端崩溃
+            return json.dumps({"type": "object", "properties": {}}, indent=2)
 
     def _extract_code_block(self, text: str, mode: str, target_lang: str = "Python") -> Dict[str, Any]:
         """
