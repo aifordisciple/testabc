@@ -5,6 +5,7 @@ from typing import List, Optional
 import uuid
 import os
 import shutil
+import traceback
 from datetime import datetime
 from sqlalchemy import func
 
@@ -94,12 +95,10 @@ def delete_project(
     if not project or project.owner_id != current_user.id:
         raise HTTPException(status_code=404, detail="Project not found")
     
-    # 1. 删除项目关联的文件链接 (ProjectFileLink)
     links = session.exec(select(ProjectFileLink).where(ProjectFileLink.project_id == project_id)).all()
     for link in links:
         session.delete(link)
     
-    # 2. 删除项目本身 (级联删除 SampleSheet/Analysis 会由 SQLAlchemy 处理)
     session.delete(project)
     session.commit()
     return {"status": "deleted"}
@@ -116,12 +115,10 @@ def create_folder(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
-    # 1. 验证权限
     project = session.get(Project, project_id)
     if not project or project.owner_id != current_user.id:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # 2. 检查父目录
     if parent_id:
         parent = session.get(File, parent_id)
         if not parent:
@@ -129,7 +126,6 @@ def create_folder(
         if not parent.is_directory:
              raise HTTPException(400, "Parent is not a directory")
     
-    # 3. 检查重名
     statement = (
         select(File)
         .join(ProjectFileLink)
@@ -143,7 +139,6 @@ def create_folder(
     if existing:
          raise HTTPException(400, "Folder already exists")
 
-    # 4. 创建文件夹记录
     virtual_key = f"{project_id}/_folders/{uuid.uuid4()}/"
     
     new_folder = File(
@@ -159,7 +154,6 @@ def create_folder(
     session.commit()
     session.refresh(new_folder)
     
-    # 5. 关联到项目
     link = ProjectFileLink(project_id=project_id, file_id=new_folder.id)
     session.add(link)
     session.commit()
@@ -170,7 +164,7 @@ def create_folder(
 # File Management
 # =======================
 
-@router.post("/upload")
+@router.post("/projects/{project_id}/files")
 def upload_file(
     project_id: uuid.UUID,
     file: UploadFile = FastAPIFile(...),
@@ -178,41 +172,74 @@ def upload_file(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
-    project = session.get(Project, project_id)
-    if not project or project.owner_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    save_dir = os.path.join(UPLOAD_ROOT, str(project_id))
-    os.makedirs(save_dir, exist_ok=True)
-    
-    file_path = os.path.join(save_dir, file.filename)
-    
+    print(f"DEBUG: Starting upload for project {project_id}")
     try:
+        project = session.get(Project, project_id)
+        if not project or project.owner_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        # 1. 物理保存文件 (覆盖模式)
+        save_dir = os.path.join(UPLOAD_ROOT, str(project_id))
+        os.makedirs(save_dir, exist_ok=True)
+        
+        file_path = os.path.join(save_dir, file.filename)
+        print(f"DEBUG: Saving file to {file_path}")
+        
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+            
+        file_size = os.path.getsize(file_path)
+        relative_path = os.path.join(str(project_id), file.filename)
+
+        # 2. 检查数据库是否已存在同名文件 (解决 Unique Constraint 错误)
+        existing_file = session.exec(
+            select(File).where(File.s3_key == relative_path)
+        ).first()
+
+        if existing_file:
+            print(f"DEBUG: File exists in DB (ID: {existing_file.id}), updating...")
+            existing_file.size = file_size
+            existing_file.uploaded_at = datetime.utcnow()
+            # 更新 content_type 如果需要
+            if file.content_type:
+                existing_file.content_type = file.content_type
+            
+            session.add(existing_file)
+            session.commit()
+            session.refresh(existing_file)
+            db_file = existing_file
+        else:
+            print("DEBUG: Creating new DB record...")
+            db_file = File(
+                filename=file.filename,
+                size=file_size,
+                content_type=file.content_type or "application/octet-stream",
+                s3_key=relative_path,
+                uploader_id=current_user.id,
+                parent_id=parent_id
+            )
+            session.add(db_file)
+            session.commit()
+            session.refresh(db_file)
+
+        # 3. 确保项目关联存在
+        link = session.exec(
+            select(ProjectFileLink)
+            .where(ProjectFileLink.project_id == project_id)
+            .where(ProjectFileLink.file_id == db_file.id)
+        ).first()
+        
+        if not link:
+            link = ProjectFileLink(project_id=project_id, file_id=db_file.id)
+            session.add(link)
+            session.commit()
+        
+        return db_file
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"File save failed: {str(e)}")
-
-    relative_path = os.path.join(str(project_id), file.filename)
-    file_size = os.path.getsize(file_path)
-
-    db_file = File(
-        filename=file.filename,
-        size=file_size,
-        content_type=file.content_type or "application/octet-stream",
-        s3_key=relative_path,
-        uploader_id=current_user.id,
-        parent_id=parent_id
-    )
-    session.add(db_file)
-    session.commit()
-    session.refresh(db_file)
-
-    link = ProjectFileLink(project_id=project_id, file_id=db_file.id)
-    session.add(link)
-    session.commit()
-
-    return db_file
+        print(f"ERROR in upload_file: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @router.get("/files/{file_id}/download")
 def download_file(
@@ -264,7 +291,6 @@ def list_project_files(
     breadcrumbs = []
     
     if recursive:
-        # 递归列出所有文件 (非目录)
         statement = (
             select(File)
             .join(ProjectFileLink, File.id == ProjectFileLink.file_id)
@@ -344,9 +370,6 @@ def remove_file_from_project(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    仅移除关联 (不物理删除文件)
-    """
     project = session.get(Project, project_id)
     if not project or project.owner_id != current_user.id:
         raise HTTPException(403, "Permission denied")
@@ -386,7 +409,6 @@ def rename_file(
     session.commit()
     return file_rec
 
-# 👇 新增：文件共享 (递归关联)
 @router.post("/files/{file_id}/link")
 def link_file_to_project(
     file_id: uuid.UUID,
@@ -394,25 +416,17 @@ def link_file_to_project(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    将文件或文件夹分享到另一个项目。
-    如果是文件夹，会递归分享其下所有子文件和子文件夹。
-    """
     target_project_id = link_req.target_project_id
     
-    # 1. 验证目标项目权限
     target_project = session.get(Project, target_project_id)
     if not target_project or target_project.owner_id != current_user.id:
         raise HTTPException(404, "Target project not found")
 
-    # 2. 验证源文件
     source_file = session.get(File, file_id)
     if not source_file:
         raise HTTPException(404, "File not found")
 
-    # 3. 递归关联函数
     def _recursive_link(f_id: uuid.UUID, proj_id: uuid.UUID):
-        # 检查是否存在
         existing_link = session.exec(
             select(ProjectFileLink)
             .where(ProjectFileLink.project_id == proj_id)
@@ -423,14 +437,12 @@ def link_file_to_project(
             new_link = ProjectFileLink(project_id=proj_id, file_id=f_id)
             session.add(new_link)
         
-        # 如果是目录，递归查找子项
         current_file = session.get(File, f_id)
         if current_file and current_file.is_directory:
             children = session.exec(select(File).where(File.parent_id == f_id)).all()
             for child in children:
                 _recursive_link(child.id, proj_id)
 
-    # 4. 执行
     try:
         _recursive_link(file_id, target_project_id)
         session.commit()

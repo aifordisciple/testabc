@@ -337,6 +337,7 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
                                     schemaStr={currentWorkflow.params_schema} 
                                     onChange={(vals) => setParams(vals)} 
                                     uploadedFiles={files} 
+                                    projectId={projectId} 
                                 />
                             ) : (
                                 <div className="text-gray-500 text-sm">Select a template to configure parameters.</div>
