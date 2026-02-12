@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, List
 class LLMClient:
     def __init__(self):
         self.provider = os.getenv("LLM_PROVIDER", "ollama")
-        self.base_url = os.getenv("LLM_BASE_URL", "[http://host.docker.internal:11434/v1](http://host.docker.internal:11434/v1)")
+        self.base_url = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")
         self.api_key = os.getenv("LLM_API_KEY", "ollama")
         # 建议使用 qwen2.5-coder:32b，它对指令遵循和多语言支持最好
         self.model = os.getenv("LLM_MODEL", "qwen2.5-coder:32b")
@@ -61,6 +61,48 @@ class LLMClient:
                 "outdir": {"type": "string", "title": "Output Directory", "default": "./results"}
             }
         }, indent=2)
+
+    def generate_schema_from_code(self, code: str, mode: str) -> str:
+        """
+        [新增] 从代码反向解析生成 JSON Schema
+        """
+        prompt = f"""
+You are a Code Analyzer. 
+Your task is to analyze the following Bioinformatics script/workflow and extract all input parameters/arguments into a JSON Schema (Draft-07).
+
+MODE: {mode}
+
+INSTRUCTIONS:
+1. If Python (argparse), look for `parser.add_argument('--name', ...)` and extract type/default/help.
+2. If R (optparse), look for `make_option(c('--name'), ...)` and extract type/default/help.
+3. If Nextflow, look for `params.name = val` definitions at the top.
+
+OUTPUT REQUIREMENT:
+- Output ONLY the raw JSON string of the schema.
+- Do NOT wrap in markdown blocks.
+- Do NOT add explanation.
+
+CODE TO ANALYZE:
+{code}
+"""
+        messages = [{"role": "user", "content": prompt}]
+        response = self._call_llm(messages)
+        clean_text = self._clean_response(response)
+        
+        # 尝试提取 JSON
+        # 有时候模型还是会加 ```json ... ```，这里做一个鲁棒提取
+        json_match = re.search(r'(\{.*\})', clean_text, re.DOTALL)
+        if json_match:
+            try:
+                # 验证解析
+                schema_str = json_match.group(1)
+                json.loads(schema_str) # 校验是否为合法 JSON
+                return schema_str
+            except:
+                pass
+        
+        # 如果正则提取失败，尝试直接返回清洗后的文本（假设只有 JSON）
+        return clean_text
 
     def _extract_code_block(self, text: str, mode: str, target_lang: str = "Python") -> Dict[str, Any]:
         """

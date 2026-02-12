@@ -23,16 +23,14 @@ interface WorkflowTemplate {
 
 interface WorkflowEditorModalProps {
   initialData?: WorkflowTemplate;
-  defaultType?: 'PIPELINE' | 'TOOL'; // 👈 新增：接收从列表页传来的默认类型
+  defaultType?: 'PIPELINE' | 'TOOL';
   onClose: () => void;
   onSave: () => void;
 }
 
 export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELINE', onClose, onSave }: WorkflowEditorModalProps) {
-  // 默认的 Nextflow 模板
   const DEFAULT_MAIN_NF = `nextflow.enable.dsl=2\n\nprocess SAY_HELLO {\n    script:\n    """\n    echo 'Hello World!'\n    """\n}\n\nworkflow {\n    SAY_HELLO()\n}`;
   
-  // 👈 新增：默认的 Python 工具模板
   const DEFAULT_TOOL_SCRIPT = `import argparse\nimport pandas as pd\n\ndef main():\n    parser = argparse.ArgumentParser(description='Custom Tool')\n    parser.add_argument('--input', type=str, required=True, help='Input file')\n    parser.add_argument('--output', type=str, default='output.tsv', help='Output file')\n    args = parser.parse_args()\n\n    # TODO: Add your logic here\n    print(f"Processing {args.input}...")\n\nif __name__ == '__main__':\n    main()`;
   
   const DEFAULT_CONFIG = `docker.enabled = true`;
@@ -43,9 +41,9 @@ export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELI
     description: '',
     category: 'Analysis',
     subcategory: '',
-    workflow_type: defaultType, // 👈 使用传入的默认类型
+    workflow_type: defaultType,
     script_path: 'custom_script_' + Date.now(),
-    source_code: defaultType === 'TOOL' ? DEFAULT_TOOL_SCRIPT : DEFAULT_MAIN_NF, // 👈 动态模板
+    source_code: defaultType === 'TOOL' ? DEFAULT_TOOL_SCRIPT : DEFAULT_MAIN_NF,
     config_code: DEFAULT_CONFIG,
     default_container: '',
     params_schema: DEFAULT_SCHEMA,
@@ -55,6 +53,9 @@ export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELI
   const [activeTab, setActiveTab] = useState<'general' | 'code' | 'config' | 'params'>('code');
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  // 👇 新增：解析状态
+  const [isParsing, setIsParsing] = useState(false);
+
   const [chatHistory, setChatHistory] = useState<Message[]>([
     { 
       role: 'system', 
@@ -64,7 +65,6 @@ export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELI
     }
   ]);
 
-  // 初始化数据
   useEffect(() => {
     if (initialData) {
       setFormData({
@@ -75,7 +75,6 @@ export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELI
         workflow_type: initialData.workflow_type || 'PIPELINE'
       });
     } else {
-        // 当新建时，如果 defaultType 改变，重置代码模板
         setFormData(prev => ({
             ...prev,
             workflow_type: defaultType,
@@ -95,9 +94,8 @@ export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELI
       }
     }
     
-    // 如果用户手动切换类型，动态改变默认代码（仅在代码未被大幅修改时，这里简单处理不覆盖已有代码，只变类型）
     if (field === 'workflow_type' && value === 'TOOL' && activeTab === 'config') {
-        setActiveTab('code'); // Tool 模式没有 config，自动切回 code
+        setActiveTab('code');
     }
   };
 
@@ -190,6 +188,44 @@ export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELI
     }
   };
 
+  // 👇 新增：手动触发参数解析
+  const handleParseParams = async () => {
+    if (!formData.source_code) return toast.error("No code to parse");
+    
+    setIsParsing(true);
+    const toastId = toast.loading("Analyzing code to extract parameters...");
+
+    try {
+      const token = localStorage.getItem('token');
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+
+      const res = await fetch(`${apiUrl}/ai/parse_params`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          code: formData.source_code,
+          mode: formData.workflow_type
+        })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        // 更新表单数据中的 params_schema
+        handleChange('params_schema', data.params_schema);
+        toast.success("Parameters updated from code!", { id: toastId });
+      } else {
+        throw new Error("Parse failed");
+      }
+    } catch (e) {
+      toast.error("Failed to parse parameters", { id: toastId });
+    } finally {
+      setIsParsing(false);
+    }
+  };
+
   const TabBtn = ({ id, label }: { id: typeof activeTab, label: string }) => (
     <button
       onClick={() => setActiveTab(id)}
@@ -230,7 +266,6 @@ export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELI
                 <TabBtn id="general" label="General" />
                 <TabBtn id="code" label="Code" />
                 <TabBtn id="params" label="Params" />
-                {/* 👈 TOOL 模式下隐藏 Config 选项卡 */}
                 {formData.workflow_type !== 'TOOL' && <TabBtn id="config" label="Config" />}
              </div>
              
@@ -284,7 +319,6 @@ export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELI
                                 >
                                     <option value="PIPELINE">Pipeline</option>
                                     <option value="MODULE">Module</option>
-                                    {/* 👈 下拉框增加 Tool 选项 */}
                                     <option value="TOOL">Tool (Script)</option>
                                 </select>
                             </div>
@@ -327,13 +361,23 @@ export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELI
                 {activeTab === 'code' && (
                     <div className="flex-1 flex flex-col">
                         <div className="px-4 py-1 bg-[#1e1e1e] border-b border-gray-700 text-xs text-gray-500 flex justify-between">
-                            {/* 👈 动态显示文件名 */}
-                            <span>{formData.workflow_type === 'TOOL' ? 'script.py / script.R' : 'main.nf'}</span>
-                            <span>{formData.source_code.length} chars</span>
+                            <span className="flex items-center gap-2">
+                                {formData.workflow_type === 'TOOL' ? 'script.py / script.R' : 'main.nf'}
+                                <span className="text-gray-600">|</span>
+                                <span>{formData.source_code.length} chars</span>
+                            </span>
+                            
+                            {/* 👇 代码页面也可以加一个快捷解析按钮 */}
+                            <button 
+                                onClick={handleParseParams}
+                                disabled={isParsing}
+                                className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors disabled:opacity-50"
+                            >
+                                {isParsing ? 'Parsing...' : '⚡ Extract Params from Code'}
+                            </button>
                         </div>
                         <div className="flex-1 relative">
                              <CodeEditor 
-                                /* 👈 动态调整代码高亮，TOOL默认给python高亮 */
                                 language={formData.workflow_type === 'TOOL' ? 'python' : 'nextflow'} 
                                 value={formData.source_code} 
                                 onChange={val => handleChange('source_code', val || '')} 
@@ -347,7 +391,22 @@ export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELI
                 {activeTab === 'params' && (
                     <div className="flex flex-1 overflow-hidden">
                         <div className="w-1/2 flex flex-col border-r border-gray-700">
-                             <div className="px-4 py-1 bg-[#1e1e1e] border-b border-gray-700 text-xs text-gray-500">JSON Schema</div>
+                             <div className="px-4 py-2 bg-[#1e1e1e] border-b border-gray-700 flex justify-between items-center">
+                                <span className="text-xs text-gray-500">JSON Schema</span>
+                                {/* 👇 新增：同步参数按钮 */}
+                                <button 
+                                    onClick={handleParseParams}
+                                    disabled={isParsing}
+                                    className="bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-xs px-3 py-1 rounded border border-blue-600/50 transition-all flex items-center gap-2"
+                                >
+                                    {isParsing ? (
+                                        <span className="animate-spin">↻</span> 
+                                    ) : (
+                                        <span>🔄</span>
+                                    )}
+                                    {isParsing ? 'Analyzing...' : 'Sync from Code'}
+                                </button>
+                             </div>
                              <div className="flex-1 relative">
                                 <CodeEditor 
                                     language="json" 
@@ -356,6 +415,7 @@ export default function WorkflowEditorModal({ initialData, defaultType = 'PIPELI
                                     height="100%"
                                 />
                              </div>
+                             {jsonError && <div className="px-4 py-2 bg-red-900/50 text-red-300 text-xs">{jsonError}</div>}
                         </div>
                         <div className="w-1/2 flex flex-col bg-gray-900">
                              <div className="px-4 py-1 bg-[#1e1e1e] border-b border-gray-700 text-xs text-blue-400 font-bold uppercase">UI Preview</div>
