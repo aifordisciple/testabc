@@ -4,6 +4,9 @@ from sqlmodel import Session, select
 from typing import List, Optional
 import uuid
 import os
+import shutil
+import mimetypes
+from pydantic import BaseModel
 
 from app.core.db import get_session
 from app.api.deps import get_current_user
@@ -13,7 +16,12 @@ from app.models.user import (
     Sample, SampleCreate, SamplePublic, SampleFileLink,
     Analysis, AnalysisCreate, AnalysisPublic
 )
+# 这里的 import 路径可能根据你的项目结构有所不同，保持你原来的引用方式
+# 如果你原来的代码里是 app.worker，请保持 app.worker
+# 如果你使用了 app.core.celery_app，请替换
+# 这里暂时保留原来的引用，但通常建议用 celery_app.send_task 避免循环引用
 from app.worker import run_workflow_task
+from app.services.workflow_service import workflow_service # 引入 workflow_service 以获取路径配置
 
 router = APIRouter()
 
@@ -169,6 +177,12 @@ def delete_sample(
 # Analysis Management
 # =======================
 
+# 👇 1. 新增 Pydantic 模型，解决参数验证错误
+class AnalysisRequest(BaseModel):
+    workflow: str
+    sample_sheet_id: Optional[uuid.UUID] = None
+    params_json: Optional[str] = "{}"
+
 @router.get("/projects/{project_id}/analyses", response_model=List[AnalysisPublic])
 def list_analyses(
     project_id: uuid.UUID,
@@ -188,7 +202,8 @@ def list_analyses(
 @router.post("/projects/{project_id}/analyses", response_model=AnalysisPublic)
 def run_analysis(
     project_id: uuid.UUID,
-    payload: AnalysisCreate,
+    # 👇 2. 使用 AnalysisRequest 替代 AnalysisCreate，支持 sample_sheet_id 为空
+    payload: AnalysisRequest,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
@@ -207,6 +222,7 @@ def run_analysis(
     session.commit()
     session.refresh(analysis)
     
+    # 异步执行
     run_workflow_task.delay(str(analysis.id))
     
     return analysis
@@ -221,15 +237,17 @@ def get_analysis_log(
     if not analysis:
         raise HTTPException(404, "Analysis not found")
         
-    if not analysis.work_dir:
-        return {"log": "Waiting for execution..."}
-        
-    log_path = os.path.join(analysis.work_dir, "analysis.log")
+    # 如果 work_dir 还没生成，使用 workflow_service 推断路径
+    log_dir = analysis.work_dir if analysis.work_dir else os.path.join(workflow_service.base_work_dir, str(analysis.id))
+    log_path = os.path.join(log_dir, "analysis.log")
+    
     if os.path.exists(log_path):
-        with open(log_path, "r") as f:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             return {"log": f.read()}
-    return {"log": "Log file not found."}
+            
+    return {"log": "Log file waiting to be created..."}
 
+# 👇 3. 升级 Report 接口：智能查找结果文件
 @router.get("/analyses/{analysis_id}/report")
 def get_analysis_report(
     analysis_id: uuid.UUID,
@@ -240,19 +258,71 @@ def get_analysis_report(
     if not analysis:
         raise HTTPException(404, "Analysis not found")
     
-    # 修复：直接使用数据库中记录的 work_dir
-    # 注意：work_dir 可能是宿主机路径，但通过 docker volume 映射，容器内也能访问该路径
-    if not analysis.work_dir:
-         raise HTTPException(404, "Analysis not started or work_dir missing")
-
-    report_path = os.path.join(
-        analysis.work_dir, 
-        "results", "multiqc", "multiqc_report.html"
-    )
+    # 获取结果目录
+    base_dir = analysis.work_dir if analysis.work_dir else os.path.join(workflow_service.base_work_dir, str(analysis.id))
+    results_dir = os.path.join(base_dir, "results")
     
-    if not os.path.exists(report_path):
-        # 调试信息：打印路径以便排查
-        print(f"DEBUG: Report not found at {report_path}")
-        raise HTTPException(404, f"Report not generated yet at {report_path}")
+    if not os.path.exists(results_dir):
+         # 尝试回退到旧的 multiqc 路径（兼容旧代码）
+         old_report = os.path.join(base_dir, "results", "multiqc", "multiqc_report.html")
+         if os.path.exists(old_report):
+             return FileResponse(old_report)
+         raise HTTPException(404, "Results directory not found")
+
+    # 智能搜索策略
+    candidates = []
+    for root, dirs, files in os.walk(results_dir):
+        for file in files:
+            if file.lower().endswith(('.html', '.pdf', '.png', '.jpg', '.svg')):
+                candidates.append(os.path.join(root, file))
+    
+    if not candidates:
+        raise HTTPException(404, "No report files found in results.")
+
+    # 优先级排序
+    def sort_key(path):
+        ext = os.path.splitext(path)[1].lower()
+        if ext == '.html': return 0
+        if ext == '.pdf': return 1
+        return 2
+    
+    candidates.sort(key=sort_key)
+    report_path = candidates[0]
+    
+    # 自动推断 MIME 类型，确保浏览器预览
+    media_type, _ = mimetypes.guess_type(report_path)
+    if not media_type:
+        media_type = "application/octet-stream"
         
-    return FileResponse(report_path)
+    return FileResponse(report_path, media_type=media_type, filename=os.path.basename(report_path))
+
+# 👇 4. 新增 Download 接口：打包下载
+@router.get("/analyses/{analysis_id}/download_results")
+def download_analysis_results(
+    analysis_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    analysis = session.get(Analysis, analysis_id)
+    if not analysis:
+        raise HTTPException(404, "Analysis not found")
+        
+    run_dir = analysis.work_dir if analysis.work_dir else os.path.join(workflow_service.base_work_dir, str(analysis.id))
+    results_dir = os.path.join(run_dir, "results")
+    
+    if not os.path.exists(results_dir) or not os.listdir(results_dir):
+        raise HTTPException(404, "Results directory is empty or missing.")
+
+    zip_base_name = os.path.join(run_dir, f"results_{analysis.id}")
+    zip_file_path = zip_base_name + ".zip"
+
+    # 如果压缩包不存在，则创建
+    if not os.path.exists(zip_file_path):
+        shutil.make_archive(
+            base_name=zip_base_name,
+            format="zip",
+            root_dir=results_dir
+        )
+    
+    filename = f"results_{analysis.id}_download.zip"
+    return FileResponse(zip_file_path, media_type="application/zip", filename=filename)

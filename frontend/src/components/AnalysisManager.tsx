@@ -129,8 +129,9 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
       const payload = {
         project_id: projectId,
         workflow: wf.script_path, 
+        // 如果是 TOOL，sample_sheet_id 为 null
         sample_sheet_id: taskType === 'PIPELINE' ? selectedSheetId : null,
-        params_json: JSON.stringify(params) // 👈 params 里现在包含了直接选中的文件路径
+        params_json: JSON.stringify(params)
       };
 
       const res = await fetch(`${apiUrl}/workflow/projects/${projectId}/analyses`, {
@@ -145,9 +146,23 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
         fetchData();
       } else {
         const err = await res.json();
-        toast.error(`Failed: ${err.detail}`, { id: loadingToast });
+        console.error("Backend Error:", err); // 在控制台打印详细错误
+        
+        // 👇 修复：智能处理错误信息显示
+        let errorMsg = "Unknown error";
+        if (typeof err.detail === 'string') {
+            errorMsg = err.detail;
+        } else if (Array.isArray(err.detail)) {
+            // FastAPI Pydantic 验证错误通常是数组
+            errorMsg = err.detail.map((e: any) => `${e.loc.join('.')}: ${e.msg}`).join('; ');
+        } else {
+            errorMsg = JSON.stringify(err.detail || err);
+        }
+        
+        toast.error(`Failed: ${errorMsg}`, { id: loadingToast });
       }
     } catch (e) { 
+        console.error(e);
         toast.error('Network error', { id: loadingToast });
     } finally { setRunning(false); }
   };
@@ -168,6 +183,7 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
     } catch (e) { setLogContent('Network error'); }
   };
 
+  // 查看报告 (预览)
   const handleViewReport = async (id: string) => {
     const loadingToast = toast.loading("Opening report...");
     try {
@@ -178,14 +194,43 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
         });
         if (res.ok) {
             const blob = await res.blob();
+            // 创建 Blob URL 并打开新窗口，浏览器会根据 Content-Type 自动决定是预览还是下载
             const url = window.URL.createObjectURL(blob);
             window.open(url, '_blank');
             toast.dismiss(loadingToast);
         } else {
-            toast.error('Report not found or not ready.', { id: loadingToast });
+            toast.error('Report not found. The tool may not have generated a report file.', { id: loadingToast });
         }
     } catch (e) { 
         toast.error('Error opening report', { id: loadingToast });
+    }
+  };
+
+  // 下载所有结果 (Zip)
+  const handleDownloadResults = async (id: string) => {
+    const loadingToast = toast.loading("Zipping results...");
+    try {
+        const token = localStorage.getItem('token');
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+        const res = await fetch(`${apiUrl}/workflow/analyses/${id}/download_results`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        if (res.ok) {
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `results_analysis_${id.slice(0,8)}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+            toast.success("Download started!", { id: loadingToast });
+        } else {
+            toast.error('Results folder not found or empty.', { id: loadingToast });
+        }
+    } catch (e) {
+        toast.error('Download failed', { id: loadingToast });
     }
   };
 
@@ -263,7 +308,7 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
                         )}
                     </div>
 
-                    {/* 2. Select Sample Sheet (仅 Pipeline 模式显示) */}
+                    {/* 2. Select Sample Sheet */}
                     {taskType === 'PIPELINE' && (
                         <div>
                             <label className="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">2. Select Sample Sheet</label>
@@ -291,7 +336,7 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
                                 <DynamicParamsForm 
                                     schemaStr={currentWorkflow.params_schema} 
                                     onChange={(vals) => setParams(vals)} 
-                                    uploadedFiles={files} /* 👈 将文件列表传给组件 */
+                                    uploadedFiles={files} 
                                 />
                             ) : (
                                 <div className="text-gray-500 text-sm">Select a template to configure parameters.</div>
@@ -340,12 +385,24 @@ export default function AnalysisManager({ projectId }: AnalysisManagerProps) {
                 <td className="px-6 py-4 text-right">
                     <button onClick={() => handleViewLog(a.id)} className="text-blue-400 hover:text-blue-300 mr-4 font-medium">Logs</button>
                     {a.status === 'completed' && (
-                        <button 
-                            onClick={() => handleViewReport(a.id)} 
-                            className="text-emerald-400 hover:text-emerald-300 font-medium"
-                        >
-                            Report
-                        </button>
+                        <>
+                            {/* Report Button */}
+                            <button 
+                                onClick={() => handleViewReport(a.id)} 
+                                className="text-emerald-400 hover:text-emerald-300 font-medium mr-4"
+                                title="View Report"
+                            >
+                                Report
+                            </button>
+                            {/* Download Button */}
+                            <button 
+                                onClick={() => handleDownloadResults(a.id)} 
+                                className="text-purple-400 hover:text-purple-300 font-medium"
+                                title="Download Results"
+                            >
+                                Download
+                            </button>
+                        </>
                     )}
                 </td>
               </tr>

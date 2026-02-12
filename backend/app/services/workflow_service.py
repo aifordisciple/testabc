@@ -10,7 +10,7 @@ from app.models.bio import WorkflowTemplate
 
 class WorkflowService:
     def __init__(self):
-        # 1. 工作目录 (保持你之前的 Mac 配置)
+        # 1. 工作目录
         self.base_work_dir = os.getenv("HOST_WORK_DIR", "/opt/data1/public/software/systools/autonome/autonome_workspace")
         
         if not os.path.exists(self.base_work_dir):
@@ -19,14 +19,13 @@ class WorkflowService:
             except Exception as e:
                 print(f"⚠️ Warning: Could not create work dir {self.base_work_dir}: {e}")
 
-        # 2. 数据目录 (保持你之前的 Mac 配置)
+        # 2. 数据目录
         self.host_data_root = os.getenv(
             "HOST_DATA_ROOT", 
             "/opt/data1/public/software/systools/autonome/autonome_data"
         )
 
-        # 3. 👇 新增：宿主机 Conda 环境持久化目录
-        # 指向你在第一步中创建的那个文件夹
+        # 3. 宿主机 Conda 环境持久化目录
         self.host_conda_dir = os.getenv(
             "HOST_CONDA_DIR",
             "/opt/data1/public/software/systools/autonome/autonome_conda"
@@ -111,10 +110,10 @@ class WorkflowService:
 
         try:
             # ==========================================
-            # 🛠️ 模式 A: 独立脚本工具 (TOOL) - 持久化 Conda 环境
+            # 🛠️ 模式 A: 独立脚本工具 (TOOL)
             # ==========================================
             if task_type == "TOOL":
-                write_log("🛠️ Mode: Standalone Tool Task (Persistent Conda)")
+                write_log("🛠️ Mode: Standalone Tool Task")
                 if not template or not template.source_code:
                     raise ValueError("Tool source code is missing in the database.")
 
@@ -126,14 +125,15 @@ class WorkflowService:
 
                 if "library(" in code or "<-" in code:
                     script_name = "script.R"
-                    exec_cmd = ["Rscript", script_name]
+                    exec_cmd = ["Rscript"]
                 elif "use strict" in code or "perl " in code.lower():
                     script_name = "script.pl"
-                    exec_cmd = ["perl", script_name]
+                    exec_cmd = ["perl"]
                 else:
                     script_name = "script.py"
-                    exec_cmd = ["python", script_name] 
+                    exec_cmd = ["python"] 
 
+                # 脚本依然保存在 run_dir 根目录，避免污染 results
                 script_path = os.path.join(run_dir, script_name)
                 with open(script_path, "w", encoding="utf-8") as f:
                     f.write(code)
@@ -147,27 +147,31 @@ class WorkflowService:
                         else:
                             script_args.extend([f"--{key}", str(val)])
 
-                # 构造 Docker 命令
+                # 👇 关键修改：
+                # 1. 将容器内工作目录设置为 results 子目录
+                # 2. 调用上层目录的脚本 (../script.py)
+                # 这样脚本生成的所有文件都会自动落在 results 目录中
+                
+                command_to_run = exec_cmd + [f"../{script_name}"] + script_args
+
                 docker_run_cmd = [
                     "docker", "run", "--rm",
                     "--pull", "never",
                     "-v", f"{self.base_work_dir}:{self.base_work_dir}",
                     "-v", f"{self.host_data_root}:/data/uploads",
-                    
-                    # 👇 关键修改：挂载宿主机的 Conda 目录到容器的 /opt/conda
-                    # 这样容器里安装的任何包都会保存到你的 Mac 上
                     "-v", f"{self.host_conda_dir}:/opt/conda",
                     
-                    "-w", run_dir,
+                    # 设置工作目录为 results 文件夹
+                    "-w", results_dir, 
                     "-u", "root",
                     docker_image
-                ] + exec_cmd + script_args
+                ] + command_to_run
 
-                write_log(f"🐳 Launching Container with Persistent Env...")
+                write_log(f"🐳 Launching Container...")
                 write_log(f"🚀 Command: {' '.join(docker_run_cmd)}")
 
                 with open(log_file_path, "a", encoding="utf-8") as f:
-                    result = subprocess.run(docker_run_cmd, cwd=run_dir, stdout=f, stderr=f, text=True)
+                    result = subprocess.run(docker_run_cmd, cwd=results_dir, stdout=f, stderr=f, text=True)
 
                 if result.returncode == 0:
                     analysis.status = "completed"
@@ -185,10 +189,10 @@ class WorkflowService:
                     raise ValueError("No SampleSheet associated for Pipeline task.")
 
                 write_log("📝 Generating samplesheet...")
+                # SampleSheet 还是放在根目录，作为输入
                 samplesheet_path = os.path.join(run_dir, "samplesheet.csv")
                 self.generate_samplesheet(session, analysis.sample_sheet_id, samplesheet_path)
-                write_log("✅ Samplesheet generated.")
-
+                
                 params_path = os.path.join(run_dir, "params.json")
                 params_dict = json.loads(analysis.params_json) if analysis.params_json else {}
                 with open(params_path, "w", encoding="utf-8") as f:
@@ -212,7 +216,7 @@ class WorkflowService:
                     "nextflow",
                     "run", pipeline_path,
                     "--input", samplesheet_path,
-                    "--outdir", results_dir,
+                    "--outdir", results_dir, # Nextflow 本身支持 outdir 参数
                     "-params-file", params_path 
                 ]
                 
