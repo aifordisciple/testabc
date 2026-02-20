@@ -37,7 +37,8 @@ class Settings(BaseSettings):
     # 如果 .env 文件中有定义，这里的值会被覆盖
     LLM_PROVIDER: str = "ollama"
     LLM_BASE_URL: str = "http://host.docker.internal:11434/v1"
-    LLM_MODEL: str = "deepseek-r1:30b"
+    # LLM_MODEL: str = "deepseek-r1:70b"
+    LLM_MODEL: str = "llama3.1:70b"
     LLM_API_KEY: str = "ollama"
 
     @property

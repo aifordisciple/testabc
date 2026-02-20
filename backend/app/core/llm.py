@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import ast
 from openai import OpenAI
 from typing import Dict, Any, Optional, List
 
@@ -9,8 +10,10 @@ class LLMClient:
         self.provider = os.getenv("LLM_PROVIDER", "ollama")
         self.base_url = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")
         self.api_key = os.getenv("LLM_API_KEY", "ollama")
-        # 建议使用 qwen2.5-coder:32b，它对指令遵循和多语言支持最好
+        # 推荐使用 qwen2.5-coder:32b 或 deepseek-r1
         self.model = os.getenv("LLM_MODEL", "qwen2.5-coder:32b")
+        
+        print(f"🚀 LLM Client Initialized: {self.model} @ {self.base_url}")
         
         self.client = OpenAI(
             base_url=self.base_url,
@@ -19,420 +22,364 @@ class LLMClient:
 
     def _clean_response(self, text: str) -> str:
         """清洗 DeepSeek/Qwen 的 <think> 标签及其他无关内容"""
+        if not text: return ""
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-        text = re.sub(r'<think>.*', '', text, flags=re.DOTALL)
+        text = re.sub(r'<think>.*', '', text, flags=re.DOTALL) # 处理截断的 think
         return text.strip()
 
-    def _detect_language_request(self, messages: List[Dict[str, str]]) -> str:
+    def _repair_json(self, json_str: str) -> str:
         """
-        [智能语言探测]
-        从用户历史消息中推断目标语言。
+        [JSON 修复引擎 V2]
+        尝试修复大模型输出的非标准 JSON 格式。
         """
-        combined_text = " ".join([m.get("content", "").lower() for m in messages])
+        if not json_str: return "{}"
         
-        # 1. 显式 R 语言关键词
-        if any(kw in combined_text for kw in ["r script", "r language", "write r code", ".r file", "r code"]):
-            return "R"
-            
-        # 2. R 语言特有的生信包/函数关键词 (隐式推断)
-        r_keywords = [
-            "pheatmap", "ggplot", "tidyverse", "deseq2", "seurat", "limma", 
-            "bioconductor", "complexheatmap", "shiny", "optparse"
-        ]
-        if any(kw in combined_text for kw in r_keywords):
-            return "R"
+        try:
+            # 1. 移除 Markdown 代码块标记
+            json_str = re.sub(r'^```\w*\s*', '', json_str.strip())
+            json_str = re.sub(r'\s*```$', '', json_str.strip())
 
-        # 3. 其他语言
-        if "perl" in combined_text:
-            return "Perl"
-        if "python" in combined_text or "pandas" in combined_text or "matplotlib" in combined_text:
-            return "Python"
-            
-        # 默认 Python
-        return "Python"
+            # 2. 移除注释 (// 和 /* */)
+            json_str = re.sub(r'//.*', '', json_str)
+            json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)
 
-    def _generate_params_schema(self, code: str) -> str:
-        """(Fallback) 尝试从代码文本中反向生成简单的 JSON Schema"""
-        # 这是一个简单的兜底策略，针对 Pipeline 模式
-        return json.dumps({
-            "type": "object",
-            "properties": {
-                "input": {"type": "string", "title": "Input File", "default": None},
-                "outdir": {"type": "string", "title": "Output Directory", "default": "./results"}
+            # 3. 修复尾随逗号 (Trailing Commas) -> {"a": 1,} -> {"a": 1}
+            json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+
+            # 4. 替换 Python 特有的 Boolean/None
+            # 注意：这可能会误伤字符串中的内容，但在解析 Schema 场景下风险可控
+            json_str = json_str.replace(": True", ": true").replace(": False", ": false").replace(": None", ": null")
+            json_str = json_str.replace(":True", ": true").replace(":False", ": false").replace(":None", ": null")
+
+            return json_str.strip()
+        except Exception as e:
+            print(f"⚠️ [JSON Repair] Exception: {e}")
+            return json_str
+
+    def _robust_json_parse(self, text: str) -> Dict[str, Any]:
+        """
+        [三级解析策略]
+        1. 直接解析
+        2. 修复后解析
+        3. AST literal_eval (容忍单引号)
+        """
+        # 尝试提取最外层 {}
+        match = re.search(r'(\{.*\})', text, re.DOTALL)
+        if match:
+            text = match.group(1)
+
+        # 策略 1: 直接解析
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # 策略 2: 修复后解析
+        try:
+            repaired = self._repair_json(text)
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
+
+        # 策略 3: Python AST 解析 (处理单引号 key: {'a': 1})
+        try:
+            # AST 解析可以将 Python 字典字符串转为对象，然后我们再 dump 成标准 JSON
+            obj = ast.literal_eval(text)
+            if isinstance(obj, dict):
+                return obj
+        except:
+            pass
+
+        print(f"❌ [JSON Parse] All strategies failed for: {text[:100]}...")
+        return {}
+
+    def _call_llm(self, messages: List[Dict[str, str]], json_mode: bool = False) -> str:
+        """
+        统一调用接口，集成日志和 JSON Mode
+        """
+        try:
+            print(f"\n{'='*20} 📤 LLM REQUEST ({self.model}) {'='*20}")
+            print(json.dumps(messages, indent=2, ensure_ascii=False))
+            print(f"{'='*60}")
+
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0.1, # 保持低温以获得稳定输出
+                "max_tokens": 8192
             }
-        }, indent=2)
+
+            # 尝试开启 JSON Mode (兼容 OpenAI API 格式)
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+                print("💡 JSON Mode: ENABLED")
+
+            response = self.client.chat.completions.create(**kwargs)
+            content = response.choices[0].message.content
+
+            print(f"\n{'='*20} 📥 LLM RESPONSE {'='*20}")
+            print(content)
+            print(f"{'='*60}\n")
+
+            return content
+
+        except Exception as e:
+            print(f"❌ LLM API Error: {e}")
+            return ""
 
     def generate_schema_from_code(self, code: str, mode: str) -> str:
         """
-        [升级版] 从代码反向解析生成 JSON Schema (Draft-07)
-        增强了对 R (optparse) 和 Python (argparse) 的解析能力，支持 Enum 和类型推断。
+        [专门用途] 从代码反向生成 JSON Schema。
+        使用了 Few-Shot Prompting 以提高准确率。
         """
+        # 构建 Few-Shot Prompt
         prompt = f"""
-You are a Senior Bioinformatics Pipeline Engineer.
-Your task is to analyze the provided script code and generate a corresponding **Draft-07 JSON Schema** for its input parameters.
-This schema will be used to generate a Web UI form.
+You are a Parser Agent. Analyze the code and extract input parameters into a **Draft-07 JSON Schema**.
 
-### ANALYSIS STRATEGY:
+### EXAMPLES
 
-#### 1. Python Scripts (using `argparse`)
-- **Scan**: Look for `parser.add_argument(...)`.
-- **Name**: Extract `--name` (strip hyphens).
-- **Type Mapping**: 
-  - `type=str` -> `"string"`
-  - `type=int` -> `"integer"`
-  - `type=float` -> `"number"`
-  - `action='store_true'` -> `"boolean"` (and set `default: false`)
-- **Enum**: If `choices=[...]` is present, generate `"enum": [...]`.
-- **Default**: Extract `default=...` value.
-- **Required**: If `required=True` is set, add parameter name to `"required"` list.
+**Input (Python):**
+parser.add_argument('--input', type=str, required=True, help="Input file")
+parser.add_argument('--threads', type=int, default=4)
 
-#### 2. R Scripts (using `optparse`)
-- **Scan**: Look for `make_option(c("-f", "--flag"), ...)`
-- **Name**: Extract long flag `--flag` (strip hyphens).
-- **Type Mapping**:
-  - `type="character"` -> `"string"`
-  - `type="integer"` -> `"integer"`
-  - `type="double"` or `type="numeric"` -> `"number"`
-  - `type="logical"` -> `"boolean"`
-  - `action="store_true"` -> `"boolean"`
-- **Default**: Extract `default=...` (handle `NULL` as null).
+**Output (JSON):**
+{{
+  "type": "object",
+  "properties": {{
+    "input": {{ "type": "string", "description": "Input file" }},
+    "threads": {{ "type": "integer", "default": 4 }}
+  }},
+  "required": ["input"]
+}}
 
-#### 3. Nextflow
-- **Scan**: Look for `params.variable = value` at the top of the file.
-- **Type**: Infer from value (quote -> string, number -> number, true/false -> boolean).
+**Input (R):**
+make_option(c("-f", "--file"), type="character", default=NULL)
+make_option(c("--verbose"), action="store_true", default=FALSE)
 
-### OUTPUT RULES:
-1. Return **ONLY** the valid JSON string.
-2. The root object must have `"type": "object"` and `"properties"`.
-3. Include `"title"`, `"description"` and `"default"` fields where possible.
+**Output (JSON):**
+{{
+  "type": "object",
+  "properties": {{
+    "file": {{ "type": "string", "default": null }},
+    "verbose": {{ "type": "boolean", "default": false }}
+  }}
+}}
 
-### SOURCE CODE:
-{backticks}
+### YOUR TASK
+Extract parameters from the following code.
+Return ONLY valid JSON.
+
+Code:
+```
 {code}
-{backticks}
+```
 """
         messages = [{"role": "user", "content": prompt}]
         
-        try:
-            print(f"🔍 [LLM] Analyzing code to extract schema ({self.model})...")
-            
-            # 尝试启用 JSON 模式 (增加确定性)
-            kwargs = {}
-            # 注意: 并非所有模型/代理都支持 response_format，这里做一个安全检查
-            # 如果你的 backend 确定支持 OpenAI 格式的 json_object，可以取消注释下面两行
-            # kwargs["response_format"] = {"type": "json_object"}
-
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.1, # 低温以保证逻辑严密
-                max_tokens=4096,
-                **kwargs
-            )
-            raw_text = response.choices[0].message.content
-        except Exception as e:
-            print(f"❌ LLM Error in generate_schema: {e}")
-            return json.dumps({"type": "object", "properties": {}}, indent=2)
-
-        # === 鲁棒的 JSON 提取逻辑 ===
-        clean_text = self._clean_response(raw_text)
+        # 强制启用 JSON Mode
+        response = self._call_llm(messages, json_mode=True)
+        cleaned = self._clean_response(response)
         
-        # 1. 优先：尝试提取 Markdown 代码块中的 JSON
-        json_block = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', clean_text, re.DOTALL)
-        if json_block:
-            candidate = json_block.group(1)
-        else:
-            # 2. 兜底：利用堆栈匹配寻找最外层的合法 JSON 对象
-            # 这能解决 "Here is the json: { ... }" 这种混合文本的情况
-            candidate = ""
-            stack = 0
-            start_idx = -1
+        parsed_obj = self._robust_json_parse(cleaned)
+        
+        # 兜底：如果解析失败或为空，返回默认
+        if not parsed_obj or "properties" not in parsed_obj:
+            print("⚠️ Schema extraction failed, returning default.")
+            return json.dumps({
+                "type": "object", 
+                "properties": {
+                    "input": {"type": "string", "title": "Input File (Auto-detected)"}
+                }
+            }, indent=2)
             
-            for i, char in enumerate(clean_text):
-                if char == '{':
-                    if stack == 0:
-                        start_idx = i
-                    stack += 1
-                elif char == '}':
-                    stack -= 1
-                    if stack == 0 and start_idx != -1:
-                        # 找到闭合的 JSON 对象
-                        candidate = clean_text[start_idx : i+1]
-                        break 
-            
-            if not candidate:
-                candidate = clean_text # 如果没找到结构，尝试解析整个文本
-
-        # 3. 验证与修补
-        try:
-            schema = json.loads(candidate)
-            
-            # 确保基本结构完整
-            if not isinstance(schema, dict):
-                raise ValueError("Parsed JSON is not an object")
-            
-            if "type" not in schema:
-                schema["type"] = "object"
-            if "properties" not in schema:
-                schema["properties"] = {}
-            
-            # 修正一些常见的数据类型错误
-            for prop_name, prop_val in schema.get("properties", {}).items():
-                # 确保 enum 是列表
-                if "enum" in prop_val and not isinstance(prop_val["enum"], list):
-                    del prop_val["enum"]
-                
-            return json.dumps(schema, indent=2)
-            
-        except Exception as e:
-            print(f"⚠️ JSON Parse Failed. Raw snippet: {clean_text[:100]}... Error: {e}")
-            # 返回空 Schema 防止前端崩溃
-            return json.dumps({"type": "object", "properties": {}}, indent=2)
+        return json.dumps(parsed_obj, indent=2)
 
     def _extract_code_block(self, text: str, mode: str, target_lang: str = "Python") -> Dict[str, Any]:
         """
-        [强健的提取器 v3]
-        使用 target_lang 进行定向提取，彻底解决 Script 和 JSON 混淆的问题。
+        [提取与后处理]
+        从 LLM 回复中提取代码块和 JSON Schema。如果 Schema 缺失，自动调用生成器补充。
         """
         clean_text = self._clean_response(text)
         
-        # 提取所有 markdown 代码块: [(lang, content), (lang, content)...]
+        # 1. 提取所有 Markdown 代码块
+        # 匹配 ```lang ... ```
         blocks = re.findall(r'```(\w*)\n(.*?)```', clean_text, re.DOTALL)
         
         main_code = ""
-        params_schema = "{}"
-        explanation = re.sub(r'```.*?```', '', clean_text, flags=re.DOTALL).strip()
-        explanation = explanation[:300] + "..." if len(explanation) > 300 else explanation
-
-        if not blocks:
-            # 兜底：如果没有 Markdown 标记，但文本看起来像代码
-            print("⚠️ No code blocks found.")
-            if mode != "TOOL" and ("process " in clean_text or "workflow {" in clean_text):
-                 return {
-                    "main_nf": clean_text,
-                    "params_schema": self._generate_params_schema(clean_text),
-                    "description": "Raw extraction",
-                    "explanation": "No markdown blocks found."
-                }
-            return self._error_fallback(clean_text, "No markdown code blocks (```) found.")
-
-        # === 策略：先找 JSON Schema，再找目标语言脚本 ===
-
-        # 1. 寻找 Parameters JSON Schema
+        params_schema_str = ""
+        
+        # 2. 遍历块进行分类
+        target_lang_lower = target_lang.lower()
+        
         for lang, content in blocks:
-            l = lang.strip().lower()
-            c = content.strip()
-            # 语言标记是 json，或者内容看起来非常像 JSON Schema (包含 "properties")
-            if l == 'json' or (c.startswith('{') and '"properties"' in c):
-                try:
-                    # 验证是否为合法 JSON
-                    json.loads(c)
-                    params_schema = c
-                    break # 找到 Schema，停止寻找
-                except:
+            lang = lang.strip().lower()
+            content = content.strip()
+            
+            # 判断是否为 JSON Schema
+            if lang == 'json' or (content.startswith('{') and '"properties"' in content):
+                # 简单验证是否看起来像 Schema
+                if '"type":' in content or '"properties":' in content:
+                    params_schema_str = content
                     continue
-
-        # 2. 寻找 Main Script (根据 target_lang)
-        target_tag = target_lang.lower() # r, python, perl...
-        
-        # 2a. 优先匹配准确的语言标签 (e.g., ```r)
-        for lang, content in blocks:
-            l = lang.strip().lower()
-            if l == target_tag:
+            
+            # 判断是否为目标代码
+            # 优先匹配准确的语言标签
+            if lang == target_lang_lower:
                 main_code = content
-                break
-        
-        # 2b. 如果没找到准确标签，尝试找通用脚本标签 (非 JSON)
-        if not main_code:
-            supported_langs = ['python', 'r', 'perl', 'bash', 'sh', 'groovy', 'nextflow']
-            for lang, content in blocks:
-                l = lang.strip().lower()
-                c = content.strip()
-                # 如果是支持的语言，且内容不等于刚才找到的 schema
-                if l in supported_langs and c != params_schema:
-                    main_code = content
-                    break
-        
-        # 2c. 终极兜底：找第一个不是 JSON Schema 的块
-        if not main_code:
-            for lang, content in blocks:
-                c = content.strip()
-                if c != params_schema and not (c.startswith('{') and '"properties"' in c):
-                    main_code = content
-                    break
+            # 其次匹配常见的脚本语言 (如果还没找到)
+            elif not main_code and lang in ['python', 'r', 'perl', 'bash', 'sh', 'groovy', 'nextflow']:
+                main_code = content
+            # 最后，如果没有语言标签，但内容不像 JSON，也可能是代码
+            elif not main_code and not lang and not content.startswith('{'):
+                main_code = content
 
-        # 3. 后处理：Pipeline 模式如果没有 Schema，尝试反向生成
-        if mode != "TOOL" and params_schema == "{}":
-             params_schema = self._generate_params_schema(main_code)
+        # 3. 兜底策略：如果没找到代码块，尝试直接从文本中提取
+        if not main_code and not blocks:
+            # 假设整个文本就是代码 (如果是 Pipeline 模式)
+            if mode != "TOOL":
+                main_code = clean_text
+            else:
+                return self._error_fallback(clean_text, f"No ```{target_lang}``` code block found.")
 
-        if not main_code:
-            return self._error_fallback(clean_text, f"Could not find a valid {target_lang} script block.")
+        # 4. Schema 自动补全/修复
+        # 如果没有提取到 Schema，或者提取到的无法解析，则调用专门的生成器
+        valid_schema = False
+        if params_schema_str:
+            parsed = self._robust_json_parse(params_schema_str)
+            if parsed and "properties" in parsed:
+                params_schema_str = json.dumps(parsed, indent=2)
+                valid_schema = True
+        
+        if not valid_schema and main_code:
+            print(f"🔄 Missing or invalid schema. Invoking specialized schema generator...")
+            params_schema_str = self.generate_schema_from_code(main_code, mode)
 
         return {
             "main_nf": main_code,
-            "params_schema": params_schema,
+            "params_schema": params_schema_str,
             "description": f"Generated {target_lang} Script",
-            "explanation": explanation or "Code generated successfully."
+            "explanation": clean_text[:200] + "..." # 简略说明
         }
 
+    def _detect_language_request(self, messages: List[Dict[str, str]]) -> str:
+        content = " ".join([m.get("content", "").lower() for m in messages])
+        if "r script" in content or "r脚本" in content or "r language" in content or "library(" in content:
+            return "R"
+        if "perl" in content:
+            return "Perl"
+        return "Python" # Default
+
     def _error_fallback(self, raw_text: str, error_msg: str) -> Dict[str, Any]:
-        safe_text = raw_text.replace("*/", "* /")
         return {
-            "main_nf": f"# GENERATION ERROR\n# {error_msg}\n\n'''\n{safe_text}\n'''",
+            "main_nf": f"# GENERATION ERROR: {error_msg}\n\n'''\n{raw_text}\n'''",
             "params_schema": "{}",
             "description": "Error",
             "explanation": error_msg
         }
 
-    def _call_llm(self, messages: List[Dict[str, str]]) -> str:
-        try:
-            print(f"🤖 Sending request to {self.model}...")
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.1, 
-                max_tokens=8192
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"❌ LLM API Error: {e}")
-            return ""
-
     def _static_analysis(self, code: str, mode: str) -> List[str]:
-        """本地静态规则"""
+        """简单的静态检查，发现严重语法错误"""
         errors = []
         if mode in ["PIPELINE", "MODULE"]:
+            if "process " in code and "workflow " not in code and mode == "PIPELINE":
+                # 这是一个 Warning，不算 Error
+                pass
             if re.search(r'output\s*:[^}]*publishDir', code, re.DOTALL):
-                errors.append("SYNTAX ERROR: `publishDir` must be placed BEFORE `input:` or `output:` blocks.")
-            if re.search(r'def\s+\w+\s*\(.*?\)\s*\{\s*process\s+', code, re.DOTALL):
-                errors.append("DSL2 VIOLATION: Do NOT wrap `process` definitions inside Groovy functions.")
+                errors.append("Nextflow Syntax Error: `publishDir` must be defined BEFORE `input:` or `output:` blocks.")
         return errors
 
-    def generate_workflow(self, messages: List[Dict[str, str]], mode: str = "MODULE", available_modules: str = "") -> Dict[str, Any]:
-        """Agentic Workflow"""
+    def _generate_draft(self, messages: List[Dict[str, str]], mode: str, available_modules: str, target_lang: str) -> str:
+        """根据模式构建 System Prompt 并请求初稿"""
         
-        # 1. 动态检测用户想要的语言
-        target_lang = "Python" # 默认
-        if mode == "TOOL":
-            target_lang = self._detect_language_request(messages)
-            print(f"🎯 Detected Intent Language: {target_lang}")
-        elif mode == "MODULE" or mode == "PIPELINE":
-            target_lang = "Nextflow"
-
-        print(f"🚀 Step 1: Drafting code for mode: {mode} ({target_lang})...")
-        draft_response = self._generate_draft(messages, mode, available_modules, target_lang)
-        
-        if not draft_response:
-             return self._error_fallback("", "LLM Connection Failed")
-
-        # 2. 提取时传入 target_lang，确保提取准确
-        current_data = self._extract_code_block(draft_response, mode, target_lang)
-        
-        if current_data["main_nf"].startswith("# GENERATION ERROR"):
-            return current_data
-
-        # === Step 2: Refine Loop ===
-        # 只有 Nextflow 代码需要静态检查，工具脚本通常靠 LLM 自己保证
-        if mode in ["PIPELINE", "MODULE"]:
-            for attempt in range(2):
-                code = current_data["main_nf"]
-                detected_errors = self._static_analysis(code, mode)
-                
-                if not detected_errors:
-                    print("✅ Static Analysis passed.")
-                    break 
-                
-                print(f"⚠️ Step 2 (Attempt {attempt+1}): Found bugs: {detected_errors}")
-                
-                refine_prompt = "Your previous code had CRITICAL ERRORS:\n"
-                for i, err in enumerate(detected_errors):
-                    refine_prompt += f"{i+1}. {err}\n"
-                refine_prompt += f"\nPlease rewrite the code in a ```{target_lang.lower()} block."
-                
-                # Refine 也要传入 target_lang
-                current_data = self._refine_code(current_data, refine_prompt, mode, target_lang)
-
-        return current_data
-
-    def _generate_draft(self, messages: List[Dict[str, str]], mode: str, available_modules: str, target_lang: str = "Python") -> str:
-        backticks = "`" * 3
-        
-        base_prompt = """
-You are an expert Bioinformatics Developer.
-"""
+        # 基础设定
+        system_prompt = "You are an expert Bioinformatics Developer. Write clean, production-ready code."
         
         if mode == "TOOL":
-            # 动态生成 Prompt，防止 Python 干扰 R
-            lang_instruction = ""
             if target_lang == "R":
-                lang_instruction = f"""
-- TARGET LANGUAGE: R
-- LIBRARY: Use `optparse` for argument parsing.
-- STRUCTURE Example:
-{backticks}r
+                template = """
 library(optparse)
 option_list = list(
-  make_option(c("-i", "--input"), type="character", default=NULL, help="input file", metavar="character"),
-  make_option(c("-o", "--output"), type="character", default="out.pdf", help="output file", metavar="character")
+    make_option(c("-i", "--input"), type="character", help="Input file"),
+    make_option(c("-o", "--output"), type="character", default="result.txt", help="Output file")
 )
-opt_parser = OptionParser(option_list=option_list)
-opt = parse_args(opt_parser)
-# Logic...
-{backticks}
+opt = parse_args(OptionParser(option_list=option_list))
+# ... logic ...
 """
-            else: # Python
-                lang_instruction = f"""
-- TARGET LANGUAGE: Python
-- LIBRARY: Use `argparse`.
-- STRUCTURE Example:
-{backticks}python
+                instruct = f"Write an R script using `optparse`. Follow this structure:\n```{template}```"
+            else:
+                template = """
 import argparse
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input', required=True)
+    parser.add_argument('--input', required=True, help="Input file")
+    parser.add_argument('--output', default="result.txt", help="Output file")
     args = parser.parse_args()
-if __name__ == '__main__':
+    # ... logic ...
+if __name__ == "__main__":
     main()
-{backticks}
 """
+                instruct = f"Write a Python script using `argparse`. Follow this structure:\n```{template}```"
+                
+            system_prompt += f"\n\nMODE: TOOL ({target_lang})\n{instruct}\n\nIMPORTANT: Output the script in a ```{target_lang.lower()}``` block."
 
-            mode_instruction = f"""
-MODE: TOOL (Standalone Script)
-TASK: Create a production-grade {target_lang} script.
-
-CRITICAL OUTPUT RULES:
-1. You MUST output the script inside a ```{target_lang.lower()}``` block.
-2. You MUST output the JSON Schema for parameters inside a separate ```json``` block.
-
-{lang_instruction}
-"""
         elif mode == "MODULE":
-            template = backticks + "groovy\nparams.outdir = './results'\n\nprocess NAME {\n    tag \"$meta.id\"\n    label 'process_medium'\n    publishDir \"${params.outdir}/name\", mode: 'copy'\n\n    input:\n    tuple val(meta), path(reads)\n    path index \n\n    output:\n    tuple val(meta), path(\"*.bam\"), emit: bam\n\n    script:\n    \"\"\"\n    tool_command --threads ${task.cpus} input output\n    \"\"\"\n}\n" + backticks
-            mode_instruction = f"MODE: MODULE (Nextflow Process).\nCreate a single `process`. Structure:\n{template}"
-        else: 
-            code_block = backticks + "groovy\n// Define default parameters\nparams.input = null\nparams.outdir = './results'\n\nChannel.fromPath(params.input)\n    .splitCsv(header:true)\n    .map{ row ->\n        def meta = [id: row.sample_id]\n        def reads = row.r2_path ? [file(row.r1_path), file(row.r2_path)] : [file(row.r1_path)]\n        return tuple(meta, reads)\n    }\n    .set { ch_input }\n" + backticks
-            mode_instruction = f"MODE: PIPELINE (Nextflow Workflow).\nStart with standard input logic:\n{code_block}\nAvailable Modules:\n{available_modules}"
+            system_prompt += "\n\nMODE: Nextflow Module.\nWrite a single `process` block. Use `publishDir` to save outputs."
+            
+        elif mode == "PIPELINE":
+            system_prompt += f"\n\nMODE: Nextflow Pipeline.\nConnect processes in a `workflow` block.\nAvailable Modules Context:\n{available_modules}"
 
-        system_prompt = base_prompt + "\n" + mode_instruction
-        msgs = [{"role": "system", "content": system_prompt}] + messages
-        return self._call_llm(msgs)
+        # 组合消息
+        full_messages = [{"role": "system", "content": system_prompt}] + messages
+        return self._call_llm(full_messages)
 
-    def _refine_code(self, current_data: Dict[str, Any], instructions: str, mode: str, target_lang: str) -> Dict[str, Any]:
-        code_to_check = current_data["main_nf"]
-        backticks = "`" * 3
-        
-        refine_prompt = f"""
-{instructions}
+    def _refine_code(self, current_data: Dict[str, Any], feedback: str, mode: str, target_lang: str) -> Dict[str, Any]:
+        """自我修正循环"""
+        code = current_data["main_nf"]
+        prompt = f"""
+The previous code had issues. Please FIX it based on the feedback.
 
-CURRENT CODE:
-{backticks}
-{code_to_check}
-{backticks}
+FEEDBACK:
+{feedback}
 
-Return the FIXED code in a ```{target_lang.lower()}``` block.
+ORIGINAL CODE:
+{code}
+
+
+Return the full FIXED code in a ```{target_lang.lower()}``` block.
 """
-        msgs = [{"role": "user", "content": refine_prompt}]
-        response_text = self._call_llm(msgs)
-        return self._extract_code_block(response_text, mode, target_lang)
+        messages = [{"role": "user", "content": prompt}]
+        response = self._call_llm(messages)
+        return self._extract_code_block(response, mode, target_lang)
+
+    def generate_workflow(self, messages: List[Dict[str, str]], mode: str = "MODULE", available_modules: str = "") -> Dict[str, Any]:
+        """
+        主入口：生成工作流或脚本
+        """
+        # 1. 确定目标语言
+        target_lang = "Python"
+        if mode == "TOOL":
+            target_lang = self._detect_language_request(messages)
+        elif mode in ["MODULE", "PIPELINE"]:
+            target_lang = "Nextflow"
+
+        print(f"🎬 Starting Generation Task: {mode} ({target_lang})")
+
+        # 2. 生成初稿
+        draft_text = self._generate_draft(messages, mode, available_modules, target_lang)
+        if not draft_text:
+            return self._error_fallback("", "LLM Empty Response")
+
+        # 3. 提取代码和参数
+        data = self._extract_code_block(draft_text, mode, target_lang)
+        
+        # 4. (可选) 静态检查与自我修正循环
+        # 对于 Pipeline/Module，进行简单的语法检查
+        if mode in ["PIPELINE", "MODULE"]:
+            errors = self._static_analysis(data["main_nf"], mode)
+            if errors:
+                print(f"⚠️ Static Analysis failed: {errors}. Attempting auto-fix...")
+                data = self._refine_code(data, "\n".join(errors), mode, target_lang)
+
+        return data
 
 llm_client = LLMClient()
