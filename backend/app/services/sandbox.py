@@ -7,40 +7,57 @@ from typing import Dict, Any
 
 class SandboxService:
     def __init__(self):
-        # 挂载的根目录，通常是 /data/uploads
+        # 1. 容器内部的挂载点 (供后端读写临时文件使用)
         self.upload_root = os.getenv("UPLOAD_ROOT", "/data/uploads")
-        # 您之前构建好的包含数据科学库的镜像
+        
+        # 2. 宿主机的真实物理路径 (供 Docker Daemon 进行挂载使用)
+        # 如果没有配置 HOST_UPLOAD_ROOT，默认使用 upload_root 作为兜底
+        self.host_upload_root = os.getenv("HOST_UPLOAD_ROOT", self.upload_root)
+        
+        # 沙箱镜像
         self.sandbox_image = "autonome-tool-env:latest"
 
     def execute_python(self, project_id: str, code: str, timeout: int = 60) -> Dict[str, Any]:
         """
-        在一个隔离的 Docker 容器中执行 Python 代码，并捕获输出。
+        在隔离的 Docker 容器中执行 Python 代码。
+        采用宿主机路径与容器路径分离策略，完美解决 Docker-in-Docker (DooD) 挂载错误。
+        
+        Args:
+            project_id: 项目ID
+            code: 待执行的 Python 代码
+            timeout: 超时时间(秒)，默认 60s
         """
         run_id = str(uuid.uuid4())
         
-        # 1. 路径准备
-        # 用户的项目目录 (挂载为只读，供 pandas 读表)
-        project_dir = os.path.join(self.upload_root, str(project_id))
+        # ==========================================
+        # 路径 A：Backend 容器内部使用的路径
+        # ==========================================
+        container_project_dir = os.path.join(self.upload_root, str(project_id))
+        container_workspace_dir = os.path.join(self.upload_root, "sandbox_tmp", run_id)
         
-        # 本次执行的临时读写目录 (存放脚本和输出的图表)
-        workspace_dir = os.path.join(self.upload_root, "sandbox_tmp", run_id)
-        os.makedirs(workspace_dir, exist_ok=True)
+        # 确保目录存在
+        os.makedirs(container_project_dir, exist_ok=True)
+        os.makedirs(container_workspace_dir, exist_ok=True)
         
-        # 2. 将代码写入临时目录的 script.py
-        script_path = os.path.join(workspace_dir, "script.py")
+        # 将代码写入后端容器内的临时目录
+        script_path = os.path.join(container_workspace_dir, "script.py")
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(code)
             
-        # 3. 构建安全的 Docker 命令
+        # ==========================================
+        # 路径 B：宿主机物理路径 (传递给 Docker 命令)
+        # ==========================================
+        host_project_dir = os.path.join(self.host_upload_root, str(project_id))
+        host_workspace_dir = os.path.join(self.host_upload_root, "sandbox_tmp", run_id)
+        
+        # 构建 Docker 命令，注意这里用的是 host_xxx_dir
         cmd = [
             "docker", "run", "--rm",
-            "--network", "none",          # 🔒 安全：断开网络
-            "--cpus", "1.0",              # 🔒 安全：限制最多使用 1 个 CPU 核心
-            "--memory", "2g",             # 🔒 安全：限制最大内存为 2GB
-            # 挂载用户项目数据为 只读 (ro -> read-only)
-            "-v", f"{project_dir}:/data:ro",
-            # 挂载当前临时目录为 读写 (rw -> read-write)
-            "-v", f"{workspace_dir}:/workspace:rw",
+            "--network", "none",          # 断网
+            "--cpus", "1.0",              # 限制 1 个 CPU
+            "--memory", "2g",             # 限制 2GB 内存
+            "-v", f"{host_project_dir}:/data:ro",     # 只读挂载用户数据
+            "-v", f"{host_workspace_dir}:/workspace:rw", # 读写挂载临时空间
             "-w", "/workspace",
             self.sandbox_image,
             "python", "script.py"
@@ -50,7 +67,7 @@ class SandboxService:
         success = False
         
         try:
-            print(f"🚀 [Sandbox] Running code for project {project_id} in container...", flush=True)
+            print(f"🚀 [Sandbox] Executing Docker Command:\n{' '.join(cmd)}", flush=True)
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout
             )
@@ -65,18 +82,19 @@ class SandboxService:
             stderr = f"Sandbox system error: {str(e)}"
             success = False
             
-        # 4. 捕获产出物 (图表 / CSV 等)
+        # ==========================================
+        # 解析产出物 (再次使用容器内部路径读取)
+        # ==========================================
         output_files = []
-        if os.path.exists(workspace_dir):
-            for item in os.listdir(workspace_dir):
+        if os.path.exists(container_workspace_dir):
+            for item in os.listdir(container_workspace_dir):
                 if item == "script.py":
                     continue
                 
-                item_path = os.path.join(workspace_dir, item)
+                item_path = os.path.join(container_workspace_dir, item)
                 if os.path.isfile(item_path):
                     ext = item.split('.')[-1].lower()
                     
-                    # 如果是图片，直接转为 Base64 以供前端内联渲染
                     if ext in ['png', 'jpg', 'jpeg', 'svg']:
                         with open(item_path, "rb") as img_f:
                             b64 = base64.b64encode(img_f.read()).decode('utf-8')
@@ -85,18 +103,18 @@ class SandboxService:
                                 "name": item, 
                                 "data": f"data:image/{ext};base64,{b64}"
                             })
-                    # 如果是数据表，读取部分内容预览
+                    # 如果输出表格，优先处理为 TSV 或截取文本预览
                     elif ext in ['csv', 'tsv', 'txt']:
                         with open(item_path, "r", encoding="utf-8", errors='replace') as txt_f:
-                            content = txt_f.read(1024 * 50) # 最多读取 50KB 避免撑爆内存
+                            content = txt_f.read(1024 * 50) # 读取前 50KB
                             output_files.append({
                                 "type": "text", 
                                 "name": item, 
                                 "content": content
                             })
                             
-            # 5. 清理临时目录 (节省服务器空间)
-            shutil.rmtree(workspace_dir, ignore_errors=True)
+            # 及时清理后端容器内的临时文件
+            shutil.rmtree(container_workspace_dir, ignore_errors=True)
             
         return {
             "success": success,
