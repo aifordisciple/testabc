@@ -2,19 +2,21 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-// 👈 引入虚拟列表 hook
 import { useVirtualizer } from '@tanstack/react-virtual';
 import UploadModal from '@/components/UploadModal';
 import SampleManager from '@/components/SampleManager';
 import AnalysisManager from '@/components/AnalysisManager';
+import CopilotPanel from '@/components/CopilotPanel'; // 👈 引入全新的 Copilot 组件
 import ConfirmModal from '@/components/ConfirmModal';
 import InputModal from '@/components/InputModal';
 import toast from 'react-hot-toast';
 
+// --- 类型定义 ---
 interface FileData { id: string; filename: string; size: number; uploaded_at: string; content_type: string; is_directory: boolean; }
 interface ProjectDetail { id: string; name: string; description: string; }
 interface Breadcrumb { id: string; name: string; }
 
+// API Helper
 const fetchAPI = async (endpoint: string) => {
     const token = localStorage.getItem('token');
     const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}${endpoint}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -22,24 +24,39 @@ const fetchAPI = async (endpoint: string) => {
     return res.json();
 };
 
+// --- 内部组件: LinkProjectModal ---
 function LinkProjectModal({ fileId, currentProjectId, onClose }: any) {
-  // ... (为了节省篇幅，这里的 LinkProjectModal 保持和上一步完全一致，不用改动) ...
   const queryClient = useQueryClient();
   const [selectedProjectId, setSelectedProjectId] = useState('');
-  const { data: projects = [] } = useQuery<ProjectDetail[]>({ queryKey: ['projects'], queryFn: () => fetchAPI('/files/projects') });
+
+  const { data: projects = [] } = useQuery<ProjectDetail[]>({
+    queryKey: ['projects'],
+    queryFn: () => fetchAPI('/files/projects'),
+  });
+  
   const availableProjects = projects.filter(p => p.id !== currentProjectId);
 
-  useEffect(() => { if (availableProjects.length > 0 && !selectedProjectId) setSelectedProjectId(availableProjects[0].id); }, [availableProjects, selectedProjectId]);
+  useEffect(() => {
+      if (availableProjects.length > 0 && !selectedProjectId) setSelectedProjectId(availableProjects[0].id);
+  }, [availableProjects, selectedProjectId]);
 
   const linkMutation = useMutation({
       mutationFn: async () => {
           const token = localStorage.getItem('token');
-          const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/files/files/${fileId}/link`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ target_project_id: selectedProjectId }) });
+          const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/files/files/${fileId}/link`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ target_project_id: selectedProjectId })
+          });
           if (!res.ok) throw await res.json();
           return res.json();
       },
-      onSuccess: () => { toast.success('Linked successfully!'); queryClient.invalidateQueries({ queryKey: ['files'] }); onClose(); },
-      onError: (err: any) => toast.error(err.status === 'already_linked' ? 'Already linked' : `Failed`)
+      onSuccess: () => {
+          toast.success('Linked successfully!');
+          queryClient.invalidateQueries({ queryKey: ['files'] });
+          onClose();
+      },
+      onError: (err: any) => toast.error(err.status === 'already_linked' ? 'Already linked' : `Failed: ${err.detail || 'Network error'}`)
   });
 
   return (
@@ -53,19 +70,22 @@ function LinkProjectModal({ fileId, currentProjectId, onClose }: any) {
         )}
         <div className="flex justify-end gap-3">
           <button onClick={onClose} className="text-gray-400 hover:text-white text-sm">Cancel</button>
-          <button onClick={() => linkMutation.mutate()} disabled={linkMutation.isPending || availableProjects.length === 0} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm transition-colors">{linkMutation.isPending ? 'Linking...' : 'Confirm'}</button>
+          <button onClick={() => linkMutation.mutate()} disabled={linkMutation.isPending || availableProjects.length === 0} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50 transition-colors">
+              {linkMutation.isPending ? 'Linking...' : 'Confirm'}
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
-// 👈 接收 isActive 属性
+// --- 主组件 props ---
 interface ProjectWorkspaceProps { projectId: string; onBack?: () => void; isActive?: boolean; }
 
 export default function ProjectWorkspace({ projectId, onBack, isActive = true }: ProjectWorkspaceProps) {
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'files' | 'samples' | 'workflow'>('files');
+  // 👈 新增 'copilot' 标签状态
+  const [activeTab, setActiveTab] = useState<'files' | 'samples' | 'workflow' | 'copilot'>('files');
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   
   const [showUpload, setShowUpload] = useState(false);
@@ -73,7 +93,12 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
   const [confirmModal, setConfirmModal] = useState<{ isOpen: boolean; title: string; message: string; action: () => void }>({ isOpen: false, title: '', message: '', action: () => {} });
   const [inputModal, setInputModal] = useState<{ isOpen: boolean; title: string; defaultValue: string; onSubmit: (val: string) => void }>({ isOpen: false, title: '', defaultValue: '', onSubmit: () => {} });
 
-  const { data: project } = useQuery<ProjectDetail>({ queryKey: ['project', projectId], queryFn: () => fetchAPI(`/files/projects/${projectId}`), enabled: isActive });
+  // --- React Query ---
+  const { data: project } = useQuery<ProjectDetail>({
+      queryKey: ['project', projectId],
+      queryFn: () => fetchAPI(`/files/projects/${projectId}`),
+      enabled: isActive
+  });
 
   const { data: filesData, isLoading: filesLoading } = useQuery({
       queryKey: ['files', projectId, currentFolderId],
@@ -84,7 +109,7 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
   const files: FileData[] = filesData?.files || [];
   const breadcrumbs: Breadcrumb[] = filesData?.breadcrumbs || [];
 
-  // 👇 虚拟列表配置
+  // --- 虚拟列表配置 ---
   const parentRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
     count: files.length,
@@ -93,14 +118,21 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
     overscan: 5, // 视口外预加载5行，防止快速滚动时白屏
   });
 
+  // --- Mutations ---
   const actionMutation = useMutation({
       mutationFn: async ({ url, method, body }: { url: string, method: string, body?: any }) => {
           const token = localStorage.getItem('token');
-          const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}${url}`, { method, headers: { 'Authorization': `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+          const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}${url}`, {
+              method,
+              headers: { 'Authorization': `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+              body: body ? JSON.stringify(body) : undefined
+          });
           if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Request failed'); }
           return res.json();
       },
-      onSuccess: () => queryClient.invalidateQueries({ queryKey: ['files', projectId] }),
+      onSuccess: () => {
+          queryClient.invalidateQueries({ queryKey: ['files', projectId] });
+      },
       onError: (err: Error) => toast.error(err.message)
   });
 
@@ -114,10 +146,25 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
     } catch (e) { toast.error('Request failed', { id: loadingToast }); }
   };
 
-  const openCreateFolderModal = () => setInputModal({ isOpen: true, title: "New Folder Name", defaultValue: "", onSubmit: (name) => { actionMutation.mutate({ url: `/files/projects/${projectId}/folders?folder_name=${encodeURIComponent(name)}${currentFolderId ? `&parent_id=${currentFolderId}` : ''}`, method: 'POST' }); toast.success("Folder created"); }});
-  const openRenameModal = (fileId: string, currentName: string) => setInputModal({ isOpen: true, title: "Rename File/Folder", defaultValue: currentName, onSubmit: (newName) => { actionMutation.mutate({ url: `/files/files/${fileId}/rename`, method: 'PATCH', body: { new_name: newName } }); toast.success("Renamed"); }});
-  const openRemoveLinkModal = (fileId: string) => setConfirmModal({ isOpen: true, title: "Remove from Project", message: "Remove file from this project view? (File remains in storage)", action: () => { actionMutation.mutate({ url: `/files/projects/${projectId}/files/${fileId}`, method: 'DELETE' }); toast.success("Removed from project"); }});
-  const openHardDeleteModal = (fileId: string, isDir: boolean) => setConfirmModal({ isOpen: true, title: isDir ? "Delete Folder" : "Delete File", message: isDir ? "⚠️ Permanently delete this folder? Ensure it is empty." : "⚠️ Permanently delete this file! Cannot be undone!", action: () => { actionMutation.mutate({ url: `/files/files/${fileId}`, method: 'DELETE' }); toast.success('Permanently deleted'); }});
+  const openCreateFolderModal = () => setInputModal({ isOpen: true, title: "New Folder Name", defaultValue: "", onSubmit: (name) => {
+      actionMutation.mutate({ url: `/files/projects/${projectId}/folders?folder_name=${encodeURIComponent(name)}${currentFolderId ? `&parent_id=${currentFolderId}` : ''}`, method: 'POST' });
+      toast.success("Folder created");
+  }});
+  
+  const openRenameModal = (fileId: string, currentName: string) => setInputModal({ isOpen: true, title: "Rename File/Folder", defaultValue: currentName, onSubmit: (newName) => {
+      actionMutation.mutate({ url: `/files/files/${fileId}/rename`, method: 'PATCH', body: { new_name: newName } });
+      toast.success("Renamed");
+  }});
+
+  const openRemoveLinkModal = (fileId: string) => setConfirmModal({ isOpen: true, title: "Remove from Project", message: "Remove file from this project view? (File remains in storage)", action: () => {
+      actionMutation.mutate({ url: `/files/projects/${projectId}/files/${fileId}`, method: 'DELETE' });
+      toast.success("Removed from project");
+  }});
+
+  const openHardDeleteModal = (fileId: string, isDir: boolean) => setConfirmModal({ isOpen: true, title: isDir ? "Delete Folder" : "Delete File", message: isDir ? "⚠️ Permanently delete this folder? Ensure it is empty." : "⚠️ Permanently delete this file! Cannot be undone!", action: () => {
+      actionMutation.mutate({ url: `/files/files/${fileId}`, method: 'DELETE' });
+      toast.success('Permanently deleted');
+  }});
 
   const formatSize = (bytes: number) => {
     if (bytes === 0) return '-';
@@ -128,6 +175,7 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
 
   return (
     <div className="h-full flex flex-col bg-gray-950 text-white overflow-hidden">
+      {/* Workspace Header */}
       <div className="px-8 py-6 border-b border-gray-800 bg-gray-900/30 flex-shrink-0">
         <div className="flex justify-between items-end">
           <div>
@@ -139,12 +187,22 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
                 )}
                 <h2 className="text-2xl font-bold">{project?.name || 'Loading...'}</h2>
             </div>
+            
+            {/* Tabs */}
             <div className="flex gap-6 mt-4">
-                {['files', 'samples', 'workflow'].map((tab) => (
-                    <button key={tab} onClick={() => setActiveTab(tab as any)} className={`pb-2 text-sm font-medium transition-colors border-b-2 capitalize ${activeTab === tab ? 'border-blue-500 text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`}>{tab}</button>
+                {/* 👈 增加了 copilot 选项卡 */}
+                {['files', 'samples', 'workflow', 'copilot'].map((tab) => (
+                    <button 
+                      key={tab} 
+                      onClick={() => setActiveTab(tab as any)} 
+                      className={`pb-2 text-sm font-medium transition-colors border-b-2 capitalize ${activeTab === tab ? 'border-blue-500 text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`}
+                    >
+                        {tab === 'copilot' ? '✨ Bio-Copilot' : tab}
+                    </button>
                 ))}
             </div>
           </div>
+          
           {activeTab === 'files' && (
              <div className="flex gap-3 mb-2">
                 <button onClick={openCreateFolderModal} className="bg-gray-800 hover:bg-gray-700 text-white px-3 py-1.5 rounded border border-gray-700 text-xs transition-colors shadow-sm">+ New Folder</button>
@@ -154,19 +212,24 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
         </div>
       </div>
 
+      {/* Workspace Content */}
       <div className="flex-1 overflow-hidden relative p-8 flex flex-col">
         {activeTab === 'files' && (
             <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 flex-1 flex flex-col overflow-hidden">
+                {/* Breadcrumbs */}
                 <div className="flex items-center gap-2 text-sm text-gray-400 mb-4 bg-gray-900/50 p-3 rounded-lg border border-gray-800 shadow-sm flex-shrink-0">
                     <span className={`cursor-pointer hover:text-white hover:underline transition-colors ${!currentFolderId ? 'font-bold text-white' : ''}`} onClick={() => setCurrentFolderId(null)}>Root</span>
                     {breadcrumbs.map((b) => (
-                        <div key={b.id} className="flex items-center gap-2"><span>/</span><span className={`cursor-pointer hover:text-white hover:underline transition-colors ${currentFolderId === b.id ? 'font-bold text-white' : ''}`} onClick={() => setCurrentFolderId(b.id)}>{b.name}</span></div>
+                        <div key={b.id} className="flex items-center gap-2">
+                        <span>/</span>
+                        <span className={`cursor-pointer hover:text-white hover:underline transition-colors ${currentFolderId === b.id ? 'font-bold text-white' : ''}`} onClick={() => setCurrentFolderId(b.id)}>{b.name}</span>
+                        </div>
                     ))}
                 </div>
 
-                {/* 👇 虚拟列表渲染区域 */}
+                {/* File Table with Virtual Scrolling */}
                 <div className="bg-gray-900 border border-gray-800 rounded-xl shadow-xl flex-1 flex flex-col overflow-hidden">
-                    {/* 固定表头 */}
+                    {/* Header */}
                     <div className="flex bg-gray-800/50 text-gray-400 text-xs uppercase tracking-wider px-6 py-4 font-medium border-b border-gray-800">
                         <div className="flex-1">Name</div>
                         <div className="w-24">Size</div>
@@ -175,15 +238,16 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
                         <div className="w-32 text-right">Actions</div>
                     </div>
                     
-                    {/* 滚动容器 */}
-                    <div 
-                        ref={parentRef} 
-                        className="flex-1 overflow-auto relative"
-                    >
-                        {filesLoading && <div className="absolute inset-0 bg-gray-900/50 backdrop-blur-sm flex items-center justify-center z-10"><span className="text-gray-400 animate-pulse font-medium">Loading files...</span></div>}
+                    {/* Scrollable Area */}
+                    <div ref={parentRef} className="flex-1 overflow-auto relative">
+                        {filesLoading && (
+                            <div className="absolute inset-0 bg-gray-900/50 backdrop-blur-sm flex items-center justify-center z-10">
+                                <span className="text-gray-400 animate-pulse font-medium">Loading files...</span>
+                            </div>
+                        )}
                         {!filesLoading && files.length === 0 && <div className="p-12 text-center text-gray-500">Folder is empty</div>}
                         
-                        {/* 虚拟占位容器 */}
+                        {/* Virtual Container */}
                         <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
                             {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                                 const file = files[virtualRow.index];
@@ -225,9 +289,12 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
             </div>
         )}
 
-        {/* 👇 传递 isActive 状态给子组件 */}
+        {/* 动态挂载其他标签页，并将 isActive 属性传下去 */}
         {activeTab === 'samples' && <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 h-full"><SampleManager projectId={projectId} /></div>}
         {activeTab === 'workflow' && <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 h-full"><AnalysisManager projectId={projectId} isActive={isActive && activeTab === 'workflow'} /></div>}
+        
+        {/* 👇 渲染刚集成的 Copilot 面板 */}
+        {activeTab === 'copilot' && <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 h-full"><CopilotPanel projectId={projectId} /></div>}
       </div>
 
       {showUpload && <UploadModal projectId={projectId} currentFolderId={currentFolderId} onClose={() => setShowUpload(false)} onUploadSuccess={() => queryClient.invalidateQueries({ queryKey: ['files', projectId] })} />}
