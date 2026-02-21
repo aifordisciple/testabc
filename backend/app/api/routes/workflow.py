@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
+from sqlalchemy import func
 from typing import List, Optional
 import uuid
 import os
 import shutil
 import mimetypes
+import asyncio
 from pydantic import BaseModel
 
 from app.core.db import get_session
@@ -16,12 +18,8 @@ from app.models.user import (
     Sample, SampleCreate, SamplePublic, SampleFileLink,
     Analysis, AnalysisCreate, AnalysisPublic
 )
-# 这里的 import 路径可能根据你的项目结构有所不同，保持你原来的引用方式
-# 如果你原来的代码里是 app.worker，请保持 app.worker
-# 如果你使用了 app.core.celery_app，请替换
-# 这里暂时保留原来的引用，但通常建议用 celery_app.send_task 避免循环引用
 from app.worker import run_workflow_task
-from app.services.workflow_service import workflow_service # 引入 workflow_service 以获取路径配置
+from app.services.workflow_service import workflow_service
 
 router = APIRouter()
 
@@ -117,7 +115,6 @@ def add_sample(
     if project.owner_id != current_user.id:
         raise HTTPException(403, "Permission denied")
 
-    # 1. 创建 Sample 记录
     sample = Sample(
         name=sample_in.name,
         group=sample_in.group,
@@ -129,7 +126,6 @@ def add_sample(
     session.commit()
     session.refresh(sample)
 
-    # 2. 关联 R1 文件
     r1_file = session.get(File, sample_in.r1_file_id)
     if not r1_file:
         raise HTTPException(400, "R1 file not found")
@@ -137,7 +133,6 @@ def add_sample(
     link_r1 = SampleFileLink(sample_id=sample.id, file_id=r1_file.id, file_role="R1")
     session.add(link_r1)
 
-    # 3. 关联 R2 文件 (可选)
     if sample_in.r2_file_id:
         r2_file = session.get(File, sample_in.r2_file_id)
         if not r2_file:
@@ -177,7 +172,6 @@ def delete_sample(
 # Analysis Management
 # =======================
 
-# 👇 1. 新增 Pydantic 模型，解决参数验证错误
 class AnalysisRequest(BaseModel):
     workflow: str
     sample_sheet_id: Optional[uuid.UUID] = None
@@ -202,7 +196,6 @@ def list_analyses(
 @router.post("/projects/{project_id}/analyses", response_model=AnalysisPublic)
 def run_analysis(
     project_id: uuid.UUID,
-    # 👇 2. 使用 AnalysisRequest 替代 AnalysisCreate，支持 sample_sheet_id 为空
     payload: AnalysisRequest,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
@@ -210,7 +203,24 @@ def run_analysis(
     project = session.get(Project, project_id)
     if not project or project.owner_id != current_user.id:
         raise HTTPException(404, "Project not found")
-        
+
+    # 🔒 安全机制：限制每个用户的并发任务数量 (默认最大2个并发)
+    MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "2"))
+
+    active_tasks = session.exec(
+        select(func.count(Analysis.id))
+        .join(Project, Project.id == Analysis.project_id)
+        .where(Project.owner_id == current_user.id)
+        .where(Analysis.status.in_(["pending", "running"]))
+    ).one()
+
+    if active_tasks >= MAX_CONCURRENT_TASKS:
+        raise HTTPException(
+            status_code=429,  # 429 Too Many Requests
+            detail=f"Resource Limit Reached: You have {active_tasks} active tasks. You can only run a maximum of {MAX_CONCURRENT_TASKS} concurrent tasks. Please wait for existing tasks to finish."
+        )
+
+    # 通过检查，提交任务
     analysis = Analysis(
         project_id=project_id,
         workflow=payload.workflow,
@@ -222,7 +232,6 @@ def run_analysis(
     session.commit()
     session.refresh(analysis)
     
-    # 异步执行
     run_workflow_task.delay(str(analysis.id))
     
     return analysis
@@ -237,7 +246,6 @@ def get_analysis_log(
     if not analysis:
         raise HTTPException(404, "Analysis not found")
         
-    # 如果 work_dir 还没生成，使用 workflow_service 推断路径
     log_dir = analysis.work_dir if analysis.work_dir else os.path.join(workflow_service.base_work_dir, str(analysis.id))
     log_path = os.path.join(log_dir, "analysis.log")
     
@@ -247,7 +255,56 @@ def get_analysis_log(
             
     return {"log": "Log file waiting to be created..."}
 
-# 👇 3. 升级 Report 接口：智能查找结果文件
+@router.websocket("/analyses/{analysis_id}/ws/log")
+async def websocket_analysis_log(
+    websocket: WebSocket,
+    analysis_id: uuid.UUID,
+    session: Session = Depends(get_session)
+):
+    """
+    通过 WebSocket 实时推送 analysis.log 内容
+    """
+    await websocket.accept()
+
+    analysis = session.get(Analysis, analysis_id)
+    if not analysis:
+        await websocket.send_text("Error: Analysis not found.\n")
+        await websocket.close()
+        return
+
+    base_dir = analysis.work_dir if analysis.work_dir else os.path.join(workflow_service.base_work_dir, str(analysis.id))
+    log_path = os.path.join(base_dir, "analysis.log")
+
+    try:
+        wait_count = 0
+        while not os.path.exists(log_path):
+            if wait_count == 0:
+                await websocket.send_text("Waiting for log file to be created...\n")
+            await asyncio.sleep(1)
+            wait_count += 1
+            if wait_count > 120:
+                await websocket.send_text("Timeout waiting for log file.\n")
+                await websocket.close()
+                return
+
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            while True:
+                line = f.readline()
+                if not line:
+                    await asyncio.sleep(0.5)
+                    continue
+                await websocket.send_text(line)
+
+    except WebSocketDisconnect:
+        print(f"Client disconnected from log stream: {analysis_id}")
+    except Exception as e:
+        print(f"WebSocket Log Error: {str(e)}")
+        try:
+            await websocket.send_text(f"\n[Error reading log: {str(e)}]\n")
+            await websocket.close()
+        except:
+            pass
+
 @router.get("/analyses/{analysis_id}/report")
 def get_analysis_report(
     analysis_id: uuid.UUID,
@@ -258,18 +315,15 @@ def get_analysis_report(
     if not analysis:
         raise HTTPException(404, "Analysis not found")
     
-    # 获取结果目录
     base_dir = analysis.work_dir if analysis.work_dir else os.path.join(workflow_service.base_work_dir, str(analysis.id))
     results_dir = os.path.join(base_dir, "results")
     
     if not os.path.exists(results_dir):
-         # 尝试回退到旧的 multiqc 路径（兼容旧代码）
          old_report = os.path.join(base_dir, "results", "multiqc", "multiqc_report.html")
          if os.path.exists(old_report):
              return FileResponse(old_report)
          raise HTTPException(404, "Results directory not found")
 
-    # 智能搜索策略
     candidates = []
     for root, dirs, files in os.walk(results_dir):
         for file in files:
@@ -279,7 +333,6 @@ def get_analysis_report(
     if not candidates:
         raise HTTPException(404, "No report files found in results.")
 
-    # 优先级排序
     def sort_key(path):
         ext = os.path.splitext(path)[1].lower()
         if ext == '.html': return 0
@@ -289,14 +342,12 @@ def get_analysis_report(
     candidates.sort(key=sort_key)
     report_path = candidates[0]
     
-    # 自动推断 MIME 类型，确保浏览器预览
     media_type, _ = mimetypes.guess_type(report_path)
     if not media_type:
         media_type = "application/octet-stream"
         
     return FileResponse(report_path, media_type=media_type, filename=os.path.basename(report_path))
 
-# 👇 4. 新增 Download 接口：打包下载
 @router.get("/analyses/{analysis_id}/download_results")
 def download_analysis_results(
     analysis_id: uuid.UUID,
@@ -316,7 +367,6 @@ def download_analysis_results(
     zip_base_name = os.path.join(run_dir, f"results_{analysis.id}")
     zip_file_path = zip_base_name + ".zip"
 
-    # 如果压缩包不存在，则创建
     if not os.path.exists(zip_file_path):
         shutil.make_archive(
             base_name=zip_base_name,

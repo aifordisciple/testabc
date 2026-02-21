@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import WorkflowEditorModal from '@/components/WorkflowEditorModal';
 import ConfirmModal from '@/components/ConfirmModal';
@@ -25,30 +26,42 @@ interface WorkflowManagerProps {
 }
 
 export default function WorkflowManager({ onBack }: WorkflowManagerProps) {
-  const [workflows, setWorkflows] = useState<WorkflowTemplate[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [editingWorkflow, setEditingWorkflow] = useState<WorkflowTemplate | undefined>(undefined);
   const [createType, setCreateType] = useState<'PIPELINE' | 'TOOL'>('PIPELINE');
   const [confirmModal, setConfirmModal] = useState<{isOpen: boolean; title: string; message: string; action: () => void;}>({ isOpen: false, title: '', message: '', action: () => {} });
 
-  const fetchWorkflows = async () => {
-    try {
+  // --- React Query: 抓取工作流 ---
+  const { data: workflows = [], isLoading } = useQuery<WorkflowTemplate[]>({
+    queryKey: ['workflows'],
+    queryFn: async () => {
       const token = localStorage.getItem('token');
-      if (!token) return;
+      if (!token) return [];
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-      const res = await fetch(`${apiUrl}/admin/workflows`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) setWorkflows(await res.json());
-    } catch (e) {
-      toast.error("Failed to load workflows");
-    } finally {
-      setLoading(false);
+      const res = await fetch(`${apiUrl}/admin/workflows`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) throw new Error("Failed to fetch workflows");
+      return res.json();
     }
-  };
+  });
 
-  useEffect(() => { fetchWorkflows(); }, []);
+  // --- React Query: 删除工作流 ---
+  const deleteMutation = useMutation({
+    mutationFn: async (id: string) => {
+        const token = localStorage.getItem('token');
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+        const res = await fetch(`${apiUrl}/admin/workflows/${id}`, {
+            method: 'DELETE', headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!res.ok) throw new Error("Delete failed");
+    },
+    onSuccess: () => {
+        toast.success("Deleted successfully");
+        queryClient.invalidateQueries({ queryKey: ['workflows'] });
+    },
+    onError: () => toast.error("Network error")
+  });
 
   const handleCreate = (type: 'PIPELINE' | 'TOOL') => {
     setCreateType(type);
@@ -66,21 +79,8 @@ export default function WorkflowManager({ onBack }: WorkflowManagerProps) {
       isOpen: true,
       title: "Delete Workflow",
       message: `Delete "${wf.name}"? This might break existing history.`,
-      action: () => deleteWorkflow(wf.id)
+      action: () => deleteMutation.mutate(wf.id)
     });
-  };
-
-  const deleteWorkflow = async (id: string) => {
-    try {
-      const token = localStorage.getItem('token');
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-      const res = await fetch(`${apiUrl}/admin/workflows/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) { toast.success("Deleted"); fetchWorkflows(); } 
-      else { toast.error("Delete failed"); }
-    } catch (e) { toast.error("Network error"); }
   };
 
   const groupedWorkflows = workflows.reduce((acc, wf) => {
@@ -90,7 +90,7 @@ export default function WorkflowManager({ onBack }: WorkflowManagerProps) {
     return acc;
   }, {} as Record<string, WorkflowTemplate[]>);
 
-  if (loading) return <div className="h-full flex items-center justify-center text-gray-500">Loading Workflows...</div>;
+  if (isLoading) return <div className="h-full flex items-center justify-center text-gray-500 animate-pulse">Loading Workflows...</div>;
 
   return (
     <div className="h-full flex flex-col bg-gray-950 text-white overflow-hidden">
@@ -115,7 +115,7 @@ export default function WorkflowManager({ onBack }: WorkflowManagerProps) {
         </div>
       </div>
 
-      {/* Scrollable Content */}
+      {/* Content */}
       <div className="flex-1 overflow-y-auto p-8">
         <div className="space-y-12">
           {Object.entries(groupedWorkflows).map(([category, items]) => (
@@ -150,8 +150,15 @@ export default function WorkflowManager({ onBack }: WorkflowManagerProps) {
         </div>
       </div>
 
-      {isEditorOpen && <WorkflowEditorModal initialData={editingWorkflow} defaultType={createType} onClose={() => setIsEditorOpen(false)} onSave={fetchWorkflows} />}
-      <ConfirmModal isOpen={confirmModal.isOpen} title={confirmModal.title} message={confirmModal.message} onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))} onConfirm={confirmModal.action} />
+      {isEditorOpen && (
+          <WorkflowEditorModal 
+              initialData={editingWorkflow} 
+              defaultType={createType} 
+              onClose={() => setIsEditorOpen(false)} 
+              onSave={() => queryClient.invalidateQueries({ queryKey: ['workflows'] })} 
+          />
+      )}
+      <ConfirmModal isOpen={confirmModal.isOpen} title={confirmModal.title} message={confirmModal.message} onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))} onConfirm={() => { confirmModal.action(); setConfirmModal(prev => ({ ...prev, isOpen: false })); }} />
     </div>
   );
 }
