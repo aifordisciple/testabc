@@ -29,13 +29,19 @@ class KnowledgeService:
         self.base_url = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")
         self.api_key = os.getenv("LLM_API_KEY", "ollama")
         self.llm_model = os.getenv("LLM_MODEL", "qwen2.5-coder:32b")
-        self.embed_model = os.getenv("EMBEDDING_MODEL", "bge-m3")
         
-        self.client = OpenAI(base_url=self.base_url, api_key=self.api_key)
-        self.instructor_client = instructor.from_openai(self.client, mode=instructor.Mode.JSON)
+        self.embed_base_url = os.getenv("EMBED_BASE_URL", "http://host.docker.internal:11434/v1")
+        self.embed_api_key = os.getenv("EMBED_API_KEY", "ollama")
+        
+        # 👇 核心修复 1：强制写死 bge-m3，防止读取到 .env 中的旧配置导致输出 768 维
+        self.embed_model = "bge-m3"
+        
+        self.llm_client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+        self.instructor_client = instructor.from_openai(self.llm_client, mode=instructor.Mode.JSON)
+        self.embed_client = OpenAI(base_url=self.embed_base_url, api_key=self.embed_api_key)
 
     def get_embedding(self, text: str) -> List[float]:
-        response = self.client.embeddings.create(
+        response = self.embed_client.embeddings.create(
             input=text.replace("\n", " "),
             model=self.embed_model
         )
@@ -48,7 +54,7 @@ class KnowledgeService:
             response_model=StructuredMetadata,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
-            max_retries=2
+            max_retries=3
         )
         return metadata
 
@@ -57,7 +63,9 @@ class KnowledgeService:
         if existing:
             return existing
             
+        print(f"🧠 [Knowledge ETL] Processing new dataset {accession} via LLM...", flush=True)
         structured_data = self.clean_metadata_with_llm(f"Title: {raw_title}\nSummary: {raw_summary}")
+        
         search_text = f"Title: {raw_title}. Disease: {structured_data.disease_state}. Summary: {structured_data.cleaned_summary}"
         embedding = self.get_embedding(search_text)
         
@@ -68,14 +76,19 @@ class KnowledgeService:
             structured_metadata=structured_data.model_dump_json(exclude_none=True),
             embedding=embedding
         )
-        db.add(dataset)
-        db.commit()
-        db.refresh(dataset)
-        return dataset
+        
+        # 👇 核心修复 2：加入 db.rollback() 防止单条报错导致后续所有数据跟着崩溃
+        try:
+            db.add(dataset)
+            db.commit()
+            db.refresh(dataset)
+            print(f"✅ [Knowledge ETL] Dataset {accession} successfully saved.", flush=True)
+            return dataset
+        except Exception as e:
+            db.rollback()  # 关键：回滚异常事务，释放锁定
+            raise e
 
-    # 👇 核心升级：改造成流式生成器 (Streaming Generator)
     def agentic_geo_search_stream(self, db: Session, user_query: str, top_k: int = 5):
-        # 1. 汇报第一步状态：正在召唤大模型
         yield json.dumps({"status": "translating", "message": "🤖 AI is reasoning and recalling datasets..."}) + "\n"
         
         prompt = f"""You are an expert bioinformatics data curator.
@@ -91,15 +104,15 @@ Ensure that the accession numbers and summaries are accurate.
             )
             raw_datasets = search_result.datasets
         except Exception as e:
-            yield json.dumps({"status": "error", "message": f"LLM retrieval failed: {e}"}) + "\n"
+            err_msg = f"LLM retrieval failed: {str(e)}"
+            print(f"❌ {err_msg}", flush=True)
+            yield json.dumps({"status": "error", "message": err_msg}) + "\n"
             return
 
-        # 2. 汇报第二步状态：拿到列表，准备对比数据库
         yield json.dumps({"status": "fetching", "message": f"🔍 AI recalled {len(raw_datasets)} datasets. Cross-checking with database..."}) + "\n"
 
         results = []
         for idx, ds in enumerate(raw_datasets):
-            # 3. 循环汇报：正在处理哪一个数据集
             yield json.dumps({"status": "processing", "message": f"⏳ Processing {ds.accession} ({idx+1}/{len(raw_datasets)})..."}) + "\n"
             
             dataset_url = ds.url if ds.url else f"https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={ds.accession}"
@@ -107,7 +120,10 @@ Ensure that the accession numbers and summaries are accurate.
                 dataset_record = self.ingest_geo_dataset(db, ds.accession, ds.title, ds.summary, dataset_url)
                 results.append(dataset_record)
             except Exception as e:
-                print(f"⚠️ Error processing {ds.accession}: {e}")
+                db.rollback() # 关键：即使外层捕获，也要确保 Session 状态干净
+                error_str = f"⚠️ Failed to process {ds.accession}: {str(e)}"
+                print(error_str, flush=True)
+                yield json.dumps({"status": "processing", "message": error_str}) + "\n"
 
         out = []
         for d in results:
@@ -117,7 +133,6 @@ Ensure that the accession numbers and summaries are accurate.
                 "disease_state": d.disease_state, "sample_count": d.sample_count, "url": d.url
             })
             
-        # 4. 最终步：打上完成标记，并将最终数据推送过去
         yield json.dumps({"status": "complete", "message": "✅ Data is ready!", "data": out}) + "\n"
 
     def import_to_project(self, db: Session, dataset_id: str, project_id: str, user_id: str):
