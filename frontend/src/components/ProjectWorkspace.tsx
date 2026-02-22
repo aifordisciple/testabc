@@ -6,17 +6,15 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import UploadModal from '@/components/UploadModal';
 import SampleManager from '@/components/SampleManager';
 import AnalysisManager from '@/components/AnalysisManager';
-import CopilotPanel from '@/components/CopilotPanel'; // 👈 引入全新的 Copilot 组件
+import CopilotPanel from '@/components/CopilotPanel'; 
 import ConfirmModal from '@/components/ConfirmModal';
 import InputModal from '@/components/InputModal';
 import toast from 'react-hot-toast';
 
-// --- 类型定义 ---
 interface FileData { id: string; filename: string; size: number; uploaded_at: string; content_type: string; is_directory: boolean; }
 interface ProjectDetail { id: string; name: string; description: string; }
 interface Breadcrumb { id: string; name: string; }
 
-// API Helper
 const fetchAPI = async (endpoint: string) => {
     const token = localStorage.getItem('token');
     const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}${endpoint}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -24,7 +22,6 @@ const fetchAPI = async (endpoint: string) => {
     return res.json();
 };
 
-// --- 内部组件: LinkProjectModal ---
 function LinkProjectModal({ fileId, currentProjectId, onClose }: any) {
   const queryClient = useQueryClient();
   const [selectedProjectId, setSelectedProjectId] = useState('');
@@ -79,12 +76,10 @@ function LinkProjectModal({ fileId, currentProjectId, onClose }: any) {
   );
 }
 
-// --- 主组件 props ---
 interface ProjectWorkspaceProps { projectId: string; onBack?: () => void; isActive?: boolean; }
 
 export default function ProjectWorkspace({ projectId, onBack, isActive = true }: ProjectWorkspaceProps) {
   const queryClient = useQueryClient();
-  // 👈 新增 'copilot' 标签状态
   const [activeTab, setActiveTab] = useState<'files' | 'samples' | 'workflow' | 'copilot'>('files');
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   
@@ -93,7 +88,6 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
   const [confirmModal, setConfirmModal] = useState<{ isOpen: boolean; title: string; message: string; action: () => void }>({ isOpen: false, title: '', message: '', action: () => {} });
   const [inputModal, setInputModal] = useState<{ isOpen: boolean; title: string; defaultValue: string; onSubmit: (val: string) => void }>({ isOpen: false, title: '', defaultValue: '', onSubmit: () => {} });
 
-  // --- React Query ---
   const { data: project } = useQuery<ProjectDetail>({
       queryKey: ['project', projectId],
       queryFn: () => fetchAPI(`/files/projects/${projectId}`),
@@ -103,22 +97,20 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
   const { data: filesData, isLoading: filesLoading } = useQuery({
       queryKey: ['files', projectId, currentFolderId],
       queryFn: () => fetchAPI(`/files/projects/${projectId}/files${currentFolderId ? `?folder_id=${currentFolderId}` : ''}`),
-      enabled: isActive && activeTab === 'files' // 仅在当前 Tab 为文件且页面可见时加载
+      enabled: isActive && activeTab === 'files'
   });
 
   const files: FileData[] = filesData?.files || [];
   const breadcrumbs: Breadcrumb[] = filesData?.breadcrumbs || [];
 
-  // --- 虚拟列表配置 ---
   const parentRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
     count: files.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 56, // 估计每一行的高度约为 56px
-    overscan: 5, // 视口外预加载5行，防止快速滚动时白屏
+    estimateSize: () => 56,
+    overscan: 5,
   });
 
-  // --- Mutations ---
   const actionMutation = useMutation({
       mutationFn: async ({ url, method, body }: { url: string, method: string, body?: any }) => {
           const token = localStorage.getItem('token');
@@ -175,7 +167,6 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
 
   return (
     <div className="h-full flex flex-col bg-gray-950 text-white overflow-hidden">
-      {/* Workspace Header */}
       <div className="px-8 py-6 border-b border-gray-800 bg-gray-900/30 flex-shrink-0">
         <div className="flex justify-between items-end">
           <div>
@@ -188,9 +179,7 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
                 <h2 className="text-2xl font-bold">{project?.name || 'Loading...'}</h2>
             </div>
             
-            {/* Tabs */}
             <div className="flex gap-6 mt-4">
-                {/* 👈 增加了 copilot 选项卡 */}
                 {['files', 'samples', 'workflow', 'copilot'].map((tab) => (
                     <button 
                       key={tab} 
@@ -212,11 +201,9 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
         </div>
       </div>
 
-      {/* Workspace Content */}
       <div className="flex-1 overflow-hidden relative p-8 flex flex-col">
         {activeTab === 'files' && (
             <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 flex-1 flex flex-col overflow-hidden">
-                {/* Breadcrumbs */}
                 <div className="flex items-center gap-2 text-sm text-gray-400 mb-4 bg-gray-900/50 p-3 rounded-lg border border-gray-800 shadow-sm flex-shrink-0">
                     <span className={`cursor-pointer hover:text-white hover:underline transition-colors ${!currentFolderId ? 'font-bold text-white' : ''}`} onClick={() => setCurrentFolderId(null)}>Root</span>
                     {breadcrumbs.map((b) => (
@@ -227,9 +214,7 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
                     ))}
                 </div>
 
-                {/* File Table with Virtual Scrolling */}
                 <div className="bg-gray-900 border border-gray-800 rounded-xl shadow-xl flex-1 flex flex-col overflow-hidden">
-                    {/* Header */}
                     <div className="flex bg-gray-800/50 text-gray-400 text-xs uppercase tracking-wider px-6 py-4 font-medium border-b border-gray-800">
                         <div className="flex-1">Name</div>
                         <div className="w-24">Size</div>
@@ -238,7 +223,6 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
                         <div className="w-32 text-right">Actions</div>
                     </div>
                     
-                    {/* Scrollable Area */}
                     <div ref={parentRef} className="flex-1 overflow-auto relative">
                         {filesLoading && (
                             <div className="absolute inset-0 bg-gray-900/50 backdrop-blur-sm flex items-center justify-center z-10">
@@ -247,7 +231,6 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
                         )}
                         {!filesLoading && files.length === 0 && <div className="p-12 text-center text-gray-500">Folder is empty</div>}
                         
-                        {/* Virtual Container */}
                         <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
                             {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                                 const file = files[virtualRow.index];
@@ -289,11 +272,8 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
             </div>
         )}
 
-        {/* 动态挂载其他标签页，并将 isActive 属性传下去 */}
         {activeTab === 'samples' && <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 h-full"><SampleManager projectId={projectId} /></div>}
         {activeTab === 'workflow' && <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 h-full"><AnalysisManager projectId={projectId} isActive={isActive && activeTab === 'workflow'} /></div>}
-        
-        {/* 👇 渲染刚集成的 Copilot 面板 */}
         {activeTab === 'copilot' && <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 h-full"><CopilotPanel projectId={projectId} /></div>}
       </div>
 

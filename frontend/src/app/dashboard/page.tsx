@@ -7,22 +7,24 @@ import CreateProjectModal from '@/components/CreateProjectModal';
 import UploadModal from '@/components/UploadModal';
 import ProjectWorkspace from '@/components/ProjectWorkspace';
 import WorkflowManager from '@/components/WorkflowManager';
+import KnowledgeBase from '@/components/KnowledgeBase'; // 👈 引入知识库组件
 import toast from 'react-hot-toast';
 
 // --- 类型定义 ---
 interface Project { id: string; name: string; description: string; created_at: string; }
-interface Tab { key: string; label: string; type: 'dashboard' | 'project' | 'workflow'; data?: any; }
+interface Tab { key: string; label: string; type: 'dashboard' | 'project' | 'workflow' | 'knowledge'; data?: any; }
 
 const NAV_ITEMS = [
   { id: 'projects', label: 'Projects', icon: (<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>) },
   { id: 'workflows', label: 'Workflows', icon: (<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>) },
+  // 👇 新增知识库入口图标
+  { id: 'knowledge', label: 'Knowledge Base', icon: (<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>) },
 ];
 
 export default function Dashboard() {
   const router = useRouter();
   const queryClient = useQueryClient();
   
-  // --- UI 状态 ---
   const [tabs, setTabs] = useState<Tab[]>([{ key: 'dashboard', label: 'Dashboard', type: 'dashboard' }]);
   const [activeTabKey, setActiveTabKey] = useState('dashboard');
   const [searchQuery, setSearchQuery] = useState('');
@@ -34,7 +36,6 @@ export default function Dashboard() {
   const [isRenaming, setIsRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
 
-  // --- React Query: 获取项目列表 ---
   const { data: projects = [], isLoading } = useQuery<Project[]>({
     queryKey: ['projects'],
     queryFn: async () => {
@@ -49,7 +50,6 @@ export default function Dashboard() {
     }
   });
 
-  // --- React Query: 删除项目 ---
   const deleteProjectMutation = useMutation({
     mutationFn: async (projectId: string) => {
         const token = localStorage.getItem('token');
@@ -62,18 +62,14 @@ export default function Dashboard() {
         toast.success("Project deleted");
         queryClient.invalidateQueries({ queryKey: ['projects'] });
         closeTab(`project-${projectId}`);
-    },
-    onError: () => toast.error("Network error")
+    }
   });
 
-  // --- React Query: 重命名项目 ---
   const renameProjectMutation = useMutation({
     mutationFn: async ({ id, name }: { id: string, name: string }) => {
         const token = localStorage.getItem('token');
         const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/files/projects/${id}`, { 
-            method: 'PATCH', 
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, 
-            body: JSON.stringify({ name }) 
+            method: 'PATCH', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ name }) 
         });
         if (!res.ok) throw new Error('Rename failed');
     },
@@ -82,24 +78,25 @@ export default function Dashboard() {
         setIsRenaming(null);
         queryClient.invalidateQueries({ queryKey: ['projects'] });
         setTabs(prev => prev.map(t => t.key === `project-${id}` ? { ...t, label: name } : t));
-    },
-    onError: () => toast.error("Network error")
+    }
   });
 
-  // --- Tab & UI 操作 ---
   const openProjectTab = (project: Project) => {
     const key = `project-${project.id}`;
-    if (!tabs.find(t => t.key === key)) {
-      setTabs([...tabs, { key, label: project.name, type: 'project', data: { projectId: project.id } }]);
-    }
+    if (!tabs.find(t => t.key === key)) setTabs([...tabs, { key, label: project.name, type: 'project', data: { projectId: project.id } }]);
     setActiveTabKey(key);
   };
 
   const openWorkflowTab = () => {
     const key = 'admin-workflows';
-    if (!tabs.find(t => t.key === key)) {
-      setTabs([...tabs, { key, label: 'Workflow Manager', type: 'workflow' }]);
-    }
+    if (!tabs.find(t => t.key === key)) setTabs([...tabs, { key, label: 'Workflow Manager', type: 'workflow' }]);
+    setActiveTabKey(key);
+  };
+
+  // 👇 新增打开知识库的函数
+  const openKnowledgeTab = () => {
+    const key = 'knowledge-base';
+    if (!tabs.find(t => t.key === key)) setTabs([...tabs, { key, label: 'Knowledge Base', type: 'knowledge' }]);
     setActiveTabKey(key);
   };
 
@@ -120,10 +117,8 @@ export default function Dashboard() {
 
   return (
     <div className="flex h-screen bg-gray-950 text-white overflow-hidden font-sans">
-      {/* Mobile Overlay */}
       {sidebarOpen && <div className="fixed inset-0 bg-black/60 z-40 md:hidden backdrop-blur-sm" onClick={() => setSidebarOpen(false)} />}
 
-      {/* Sidebar */}
       <aside className={`fixed md:static inset-y-0 left-0 z-50 w-64 bg-[#0d1117] border-r border-gray-800 flex flex-col transition-transform duration-300 ease-in-out ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}>
         <div className="p-6 border-b border-gray-800 flex items-center gap-3">
           <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-blue-500 rounded-lg flex items-center justify-center shadow-lg"><span className="font-bold text-white">A</span></div>
@@ -136,12 +131,15 @@ export default function Dashboard() {
           <button onClick={() => { openWorkflowTab(); setSidebarOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${activeTabKey === 'admin-workflows' ? 'bg-purple-600/10 text-purple-400' : 'text-gray-400 hover:bg-gray-800'}`}>
             {NAV_ITEMS[1].icon} Workflows
           </button>
+          {/* 👇 新增左侧菜单按钮 */}
+          <button onClick={() => { openKnowledgeTab(); setSidebarOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${activeTabKey === 'knowledge-base' ? 'bg-emerald-600/10 text-emerald-400' : 'text-gray-400 hover:bg-gray-800'}`}>
+            {NAV_ITEMS[2].icon} Public Data
+          </button>
         </nav>
       </aside>
 
-      {/* Main Content */}
       <div className="flex-1 flex flex-col min-w-0 bg-gray-950 relative">
-        <header className="h-12 border-b border-gray-800 bg-[#0d1117] flex items-center px-2 gap-1 overflow-x-auto scrollbar-hide">
+        <header className="h-12 border-b border-gray-800 bg-[#0d1117] flex items-center px-2 gap-1 overflow-x-auto scrollbar-hide flex-shrink-0">
             <button onClick={() => setSidebarOpen(true)} className="md:hidden p-2 text-gray-400 hover:text-white mr-2"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg></button>
             {tabs.map(tab => (
                 <div key={tab.key} onClick={() => setActiveTabKey(tab.key)} className={`group flex items-center gap-2 px-4 py-1.5 rounded-t-lg text-xs font-medium cursor-pointer border-t-2 transition-all min-w-[120px] max-w-[200px] select-none ${activeTabKey === tab.key ? 'bg-gray-950 border-blue-500 text-white' : 'bg-gray-900/50 border-transparent text-gray-500 hover:bg-gray-900 hover:text-gray-300'}`}>
@@ -154,7 +152,6 @@ export default function Dashboard() {
         </header>
 
         <main className="flex-1 overflow-hidden relative">
-            {/* Dashboard Tab */}
             <div className={`absolute inset-0 flex flex-col p-8 overflow-y-auto ${activeTabKey === 'dashboard' ? 'z-10 bg-gray-950' : 'z-0 invisible'}`}>
                 <div className="max-w-7xl mx-auto w-full space-y-8">
                     <div className="flex justify-between items-center">
@@ -197,10 +194,9 @@ export default function Dashboard() {
 
             {tabs.map(tab => {
                 if (tab.type !== 'project') return null;
-                const isActive = activeTabKey === tab.key; // 👈 判断是否为当前激活的 Tab
+                const isActive = activeTabKey === tab.key;
                 return (
                     <div key={tab.key} className={`absolute inset-0 bg-gray-950 ${isActive ? 'z-10' : 'z-0 invisible'}`}>
-                        {/* 👈 传入 isActive */}
                         <ProjectWorkspace projectId={tab.data.projectId} onBack={() => closeTab(tab.key)} isActive={isActive} />
                     </div>
                 );
@@ -215,10 +211,31 @@ export default function Dashboard() {
                     </div>
                 );
             })}
+
+            {/* 👇 渲染知识库选项卡 */}
+            {tabs.map(tab => {
+                if (tab.type !== 'knowledge') return null;
+                const isActive = activeTabKey === tab.key;
+                return (
+                    <div key={tab.key} className={`absolute inset-0 bg-gray-900 flex flex-col ${isActive ? 'z-10' : 'z-0 invisible'}`}>
+                        {/* 增加一个简单的返回头，保持风格统一 */}
+                        <div className="px-8 py-4 border-b border-gray-800 bg-[#0d1117] flex justify-between items-center flex-shrink-0">
+                           <div className="flex items-center gap-3">
+                              <button onClick={() => closeTab(tab.key)} className="text-gray-500 hover:text-white transition-colors p-1 rounded hover:bg-gray-800">
+                                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                              </button>
+                              <h2 className="text-lg font-bold text-gray-200">Public Datasets</h2>
+                           </div>
+                        </div>
+                        <KnowledgeBase />
+                    </div>
+                );
+            })}
+
         </main>
 
         {showCreate && <CreateProjectModal onClose={() => setShowCreate(false)} onSuccess={handleCreateSuccess} />}
-        {showUpload && <UploadModal projectId={activeProjectId} currentFolderId={null} onClose={() => setShowUpload(false)} onUploadSuccess={() => {}} />}
+        {showUpload && <UploadModal projectId={activeProjectId} onClose={() => setShowUpload(false)} onUploadSuccess={() => {}} />}
       </div>
     </div>
   );

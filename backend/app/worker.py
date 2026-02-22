@@ -47,3 +47,42 @@ def run_workflow_task(analysis_id: str):
         print(f"❌ [Celery] Task failed: {str(e)}")
         # 实际生产中这里可以调用 session 更新 Analysis 状态为 failed
         raise e
+
+# 👇 追加导入相关的包
+from app.services.geo_service import geo_service
+from app.services.knowledge_service import knowledge_service
+from app.core.db import engine
+from sqlmodel import Session
+
+@celery_app.task(name="sync_recent_geo_datasets")
+def sync_recent_geo_datasets(batch_size=15):
+    """
+    后台定时任务：抓取最新 GEO 数据，调用大模型清洗并存入向量库
+    """
+    print(f"🔄 [Cron Task] Starting GEO dataset synchronization (Batch size: {batch_size})...")
+    
+    # 1. 抓取原始数据
+    datasets = geo_service.fetch_recent_datasets(retmax=batch_size)
+    if not datasets:
+        print("⚠️ [Cron Task] No datasets fetched. Aborting.")
+        return 0
+        
+    success_count = 0
+    with Session(engine) as db:
+        for ds in datasets:
+            try:
+                # 2. 调用已有的知识库服务进行 LLM 结构化提取和向量化入库
+                # 注意：ingest_geo_dataset 内部已经有查重机制，遇到已存在的会自动跳过
+                knowledge_service.ingest_geo_dataset(
+                    db=db,
+                    accession=ds["accession"],
+                    raw_title=ds["title"],
+                    raw_summary=ds["summary"],
+                    url=ds["url"]
+                )
+                success_count += 1
+            except Exception as e:
+                print(f"❌ [Cron Task] Error ingesting {ds['accession']}: {e}")
+                
+    print(f"✅ [Cron Task] GEO sync completed. Successfully processed {success_count}/{len(datasets)} datasets.")
+    return success_count

@@ -186,3 +186,79 @@ def chat_with_copilot(
     except Exception as e:
         print(f"Copilot Error: {str(e)}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+# 👇 追加导入
+from app.models.user import Analysis
+from app.services.workflow_service import workflow_service
+from langchain_core.messages import SystemMessage, HumanMessage
+import os
+
+class DiagnoseResponse(BaseModel):
+    diagnosis: str
+
+@router.post("/projects/{project_id}/analyses/{analysis_id}/diagnose", response_model=DiagnoseResponse)
+def diagnose_analysis_error(
+    project_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    智能错误诊断接口：读取失败任务的最后 150 行日志，调用 LLM 分析报错原因。
+    """
+    # 1. 权限与记录验证
+    project = session.get(Project, project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    analysis = session.get(Analysis, analysis_id)
+    if not analysis or analysis.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+        
+    # 2. 读取日志文件 (取最后 150 行)
+    base_dir = analysis.work_dir if analysis.work_dir else os.path.join(workflow_service.base_work_dir, str(analysis.id))
+    log_path = os.path.join(base_dir, "analysis.log")
+    
+    if not os.path.exists(log_path):
+        raise HTTPException(status_code=404, detail="Log file not found.")
+        
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+            tail_lines = lines[-150:]
+            error_log = "".join(tail_lines)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading log: {str(e)}")
+
+    if not error_log.strip():
+        return DiagnoseResponse(diagnosis="Log file is empty. The task might not have started properly.")
+
+    # 3. 构建 Prompt 并调用原生 Langchain LLM
+    from app.core.agent import get_llm 
+    llm = get_llm()
+    
+    system_prompt = SystemMessage(content="""You are a Senior Bioinformatics DevOps Engineer. 
+Your task is to analyze failed execution logs (Nextflow, Docker, Python, or R) and provide a concise, accurate diagnosis.
+Output format:
+1. **Root Cause**: (What went wrong in simple terms)
+2. **Detailed Analysis**: (Explain the specific log error)
+3. **Actionable Fix**: (What the user should do to fix it. e.g., 'Increase memory to 4GB', 'Check if input FASTQ is empty', 'Fix parameter typo')
+Use Markdown. Be extremely precise and helpful.
+""")
+
+    # 修复点：移除了这里的 Markdown 三引号，使用破折号替代，防止代码块被意外截断
+    user_prompt = HumanMessage(content=f"""Here is the tail of the failed log for workflow '{analysis.workflow}':
+
+---
+{error_log}
+---
+
+Please diagnose the error.""")
+
+    try:
+        print(f"🩺 [Auto-Debug] Diagnosing analysis {analysis_id}...", flush=True)
+        response = llm.invoke([system_prompt, user_prompt])
+        return DiagnoseResponse(diagnosis=response.content)
+    except Exception as e:
+        print(f"Diagnosis LLM Error: {str(e)}", flush=True)
+        raise HTTPException(status_code=500, detail="AI diagnosis failed to generate.")
