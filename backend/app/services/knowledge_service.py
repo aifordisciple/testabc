@@ -45,7 +45,10 @@ class KnowledgeService:
             input=text.replace("\n", " "),
             model=self.embed_model
         )
-        return response.data[0].embedding
+        vec = response.data[0].embedding
+        # 👇 打印实际收到的维度，帮您排查本地大模型的真实情况
+        print(f"📊 [Vector Info] Requested '{self.embed_model}', actually received dimension: {len(vec)}", flush=True)
+        return vec
 
     def clean_metadata_with_llm(self, raw_text: str) -> StructuredMetadata:
         prompt = f"Extract the key experimental metadata from the following dataset description:\n\n{raw_text}"
