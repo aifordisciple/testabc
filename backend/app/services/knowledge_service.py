@@ -5,7 +5,8 @@ import instructor
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from sqlmodel import Session, select
+# 👇 核心修复 1：引入 SQLModel 的 or_ 进行多条件查询
+from sqlmodel import Session, select, or_ 
 from app.models.knowledge import PublicDataset
 from app.models.user import Project, File, ProjectFileLink
 
@@ -32,8 +33,6 @@ class KnowledgeService:
         
         self.embed_base_url = os.getenv("EMBED_BASE_URL", "http://host.docker.internal:11434/v1")
         self.embed_api_key = os.getenv("EMBED_API_KEY", "ollama")
-        
-        # 👇 核心修复 1：强制写死 bge-m3，防止读取到 .env 中的旧配置导致输出 768 维
         self.embed_model = "bge-m3"
         
         self.llm_client = OpenAI(base_url=self.base_url, api_key=self.api_key)
@@ -46,8 +45,6 @@ class KnowledgeService:
             model=self.embed_model
         )
         vec = response.data[0].embedding
-        # 👇 打印实际收到的维度，帮您排查本地大模型的真实情况
-        print(f"📊 [Vector Info] Requested '{self.embed_model}', actually received dimension: {len(vec)}", flush=True)
         return vec
 
     def clean_metadata_with_llm(self, raw_text: str) -> StructuredMetadata:
@@ -80,7 +77,6 @@ class KnowledgeService:
             embedding=embedding
         )
         
-        # 👇 核心修复 2：加入 db.rollback() 防止单条报错导致后续所有数据跟着崩溃
         try:
             db.add(dataset)
             db.commit()
@@ -88,8 +84,47 @@ class KnowledgeService:
             print(f"✅ [Knowledge ETL] Dataset {accession} successfully saved.", flush=True)
             return dataset
         except Exception as e:
-            db.rollback()  # 关键：回滚异常事务，释放锁定
+            db.rollback()
             raise e
+
+    # 👇 核心修复 2：升级为 混合检索 (Hybrid Search)
+    def semantic_search(self, db: Session, query: str, top_k: int = 5) -> List[PublicDataset]:
+        """混合本地检索：精准文本匹配 + 向量语义检索"""
+        query_str = query.strip()
+        
+        # 1. 优先进行传统关系型数据库的文本精确/模糊匹配 (特别擅长抓取 GSE 编号或精确词汇)
+        text_matches = db.exec(
+            select(PublicDataset)
+            .where(
+                or_(
+                    PublicDataset.accession.ilike(f"%{query_str}%"),
+                    PublicDataset.title.ilike(f"%{query_str}%")
+                )
+            )
+            .limit(top_k)
+        ).all()
+        
+        # 2. 同时进行向量语义匹配 (擅长理解长句和同义词)
+        query_embedding = self.get_embedding(query_str)
+        distance_threshold = 0.6 
+        vector_matches = db.exec(
+            select(PublicDataset)
+            .where(PublicDataset.embedding.cosine_distance(query_embedding) < distance_threshold)
+            .order_by(PublicDataset.embedding.cosine_distance(query_embedding))
+            .limit(top_k)
+        ).all()
+        
+        # 3. 结果合并与去重（将精确匹配的 GSE 编号结果置顶放在最前面）
+        results = list(text_matches)
+        seen_ids = {ds.id for ds in results}
+        
+        for ds in vector_matches:
+            if ds.id not in seen_ids:
+                results.append(ds)
+                seen_ids.add(ds.id)
+                
+        # 限制返回的最大数量
+        return results[:top_k]
 
     def agentic_geo_search_stream(self, db: Session, user_query: str, top_k: int = 5):
         yield json.dumps({"status": "translating", "message": "🤖 AI is reasoning and recalling datasets..."}) + "\n"
@@ -123,7 +158,7 @@ Ensure that the accession numbers and summaries are accurate.
                 dataset_record = self.ingest_geo_dataset(db, ds.accession, ds.title, ds.summary, dataset_url)
                 results.append(dataset_record)
             except Exception as e:
-                db.rollback() # 关键：即使外层捕获，也要确保 Session 状态干净
+                db.rollback() 
                 error_str = f"⚠️ Failed to process {ds.accession}: {str(e)}"
                 print(error_str, flush=True)
                 yield json.dumps({"status": "processing", "message": error_str}) + "\n"
