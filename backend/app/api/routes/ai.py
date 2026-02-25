@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 import uuid
 
@@ -262,3 +262,162 @@ Please diagnose the error.""")
     except Exception as e:
         print(f"Diagnosis LLM Error: {str(e)}", flush=True)
         raise HTTPException(status_code=500, detail="AI diagnosis failed to generate.")
+
+
+# ================================
+# 5. [新增] Copilot 智能分析接口
+# ================================
+from app.services.copilot_orchestrator import copilot_orchestrator, CopilotResponse
+from app.services.workflow_matcher import WorkflowMatch
+
+class CopilotAnalyzeRequest(BaseModel):
+    """Copilot 分析请求"""
+    query: str = Field(..., description="用户的自然语言分析需求")
+
+class CopilotExecuteRequest(BaseModel):
+    """Copilot 执行请求"""
+    mode: str = Field(..., description="执行模式: workflow_match | code_generation")
+    template_id: Optional[str] = Field(None, description="流程模板ID (workflow_match 模式)")
+    sample_sheet_id: Optional[str] = Field(None, description="样本表ID")
+    params: Optional[Dict[str, Any]] = Field(default_factory=dict, description="参数")
+    generated_code: Optional[str] = Field(None, description="生成的代码 (code_generation 模式)")
+    generated_schema: Optional[str] = Field(None, description="生成的参数 Schema")
+    workflow_name: Optional[str] = Field(None, description="新流程名称")
+
+@router.post("/projects/{project_id}/copilot/analyze", response_model=CopilotResponse)
+async def copilot_analyze(
+    project_id: uuid.UUID,
+    payload: CopilotAnalyzeRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Copilot 智能分析入口
+    
+    接收用户的自然语言描述，返回推荐的分析方案：
+    - 如果匹配到已有流程，返回流程信息和推断的参数
+    - 如果没有匹配，返回生成的自定义代码
+    - 如果需求不明确，返回需要澄清的问题
+    """
+    project = session.get(Project, project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    if not payload.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+    
+    try:
+        result = await copilot_orchestrator.analyze_request(
+            user_input=payload.query,
+            project_id=str(project_id),
+            session=session,
+            user=current_user
+        )
+        return result
+    except Exception as e:
+        print(f"❌ Copilot Analyze Error: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/projects/{project_id}/copilot/execute")
+async def copilot_execute(
+    project_id: uuid.UUID,
+    payload: CopilotExecuteRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Copilot 执行入口
+    
+    用户确认方案后，创建并执行分析任务：
+    - workflow_match 模式：使用已有流程模板
+    - code_generation 模式：创建新的临时流程并执行
+    """
+    from app.models.user import Analysis, SampleSheet
+    from app.worker import run_workflow_task
+    import json
+    
+    project = session.get(Project, project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    try:
+        workflow_name = None
+        workflow_script_path = None
+        params_json = json.dumps(payload.params) if payload.params else "{}"
+        
+        if payload.mode == "workflow_match":
+            if not payload.template_id:
+                raise HTTPException(status_code=400, detail="template_id is required for workflow_match mode")
+            
+            template = session.get(WorkflowTemplate, uuid.UUID(payload.template_id))
+            if not template:
+                raise HTTPException(status_code=404, detail="Workflow template not found")
+            
+            workflow_name = template.script_path or template.name
+            
+            template.usage_count = (template.usage_count or 0) + 1
+            session.add(template)
+            session.commit()
+            
+        elif payload.mode == "code_generation":
+            if not payload.generated_code:
+                raise HTTPException(status_code=400, detail="generated_code is required for code_generation mode")
+            
+            workflow_name = payload.workflow_name or f"custom_{uuid.uuid4().hex[:8]}"
+            
+            new_template = WorkflowTemplate(
+                name=workflow_name,
+                description=f"AI Generated: {payload.workflow_name or 'Custom Workflow'}",
+                category="Custom",
+                workflow_type="TOOL",
+                source_code=payload.generated_code,
+                params_schema=payload.generated_schema or "{}",
+                is_public=False
+            )
+            session.add(new_template)
+            session.commit()
+            session.refresh(new_template)
+            
+            workflow_name = new_template.name
+            
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid mode: {payload.mode}")
+        
+        sample_sheet_id = None
+        if payload.sample_sheet_id:
+            try:
+                sample_sheet_id = uuid.UUID(payload.sample_sheet_id)
+            except:
+                pass
+        
+        analysis = Analysis(
+            project_id=project_id,
+            workflow=workflow_name,
+            params_json=params_json,
+            status="pending",
+            sample_sheet_id=sample_sheet_id
+        )
+        session.add(analysis)
+        session.commit()
+        session.refresh(analysis)
+        
+        run_workflow_task.delay(str(analysis.id))
+        
+        print(f"✅ [Copilot Execute] Created analysis {analysis.id}", flush=True)
+        
+        return {
+            "status": "success",
+            "analysis_id": str(analysis.id),
+            "workflow": workflow_name,
+            "message": "任务已创建并开始执行"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Copilot Execute Error: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))

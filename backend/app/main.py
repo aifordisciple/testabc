@@ -8,7 +8,7 @@ from sqlmodel import select
 from app.core.config import settings
 from app.core.db import init_db, get_session
 # 👇 1. 在这里补充导入 knowledge 路由
-from app.api.routes import auth, files, workflow, admin, ai, knowledge
+from app.api.routes import auth, files, workflow, admin, ai, knowledge, conversations, conversations
 from app.models.bio import WorkflowTemplate
 
 # === 数据预置 (Seeding) ===
@@ -92,6 +92,8 @@ app.include_router(admin.router, prefix=f"{settings.API_V1_STR}/admin", tags=["A
 app.include_router(ai.router, prefix=f"{settings.API_V1_STR}/ai", tags=["AI"]) 
 # 👇 2. 在这里注册 Knowledge 路由
 app.include_router(knowledge.router, prefix=f"{settings.API_V1_STR}/knowledge", tags=["Knowledge"])
+# 👇 3. 注册 Conversations 路由
+app.include_router(conversations.router, prefix=f"{settings.API_V1_STR}/conversations", tags=["Conversations"])
 
 @app.get("/")
 def root():

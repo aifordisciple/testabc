@@ -1,6 +1,8 @@
 # backend/app/models/bio.py
 from sqlmodel import SQLModel, Field
-from typing import Optional
+from sqlalchemy import Column
+from pgvector.sqlalchemy import Vector
+from typing import Optional, List
 from datetime import datetime
 import uuid
 
@@ -39,6 +41,14 @@ class WorkflowTemplate(WorkflowTemplateBase, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
     is_public: bool = Field(default=True)
+    
+    embedding: Optional[List[float]] = Field(
+        default=None,
+        sa_column=Column(Vector),
+        description="流程描述的向量嵌入，用于语义匹配"
+    )
+    
+    usage_count: int = Field(default=0, description="使用次数统计")
 
 class WorkflowTemplateCreate(WorkflowTemplateBase):
     pass

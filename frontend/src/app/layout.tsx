@@ -1,10 +1,7 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "react-hot-toast";
-import Providers from "./providers"; // 👈 引入 Providers
-
-const inter = Inter({ subsets: ["latin"] });
+import Providers from "./providers";
 
 export const metadata: Metadata = {
   title: "Autonome - Bioinformatics AI Agent",
@@ -18,8 +15,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${inter.className} bg-gray-950 text-white min-h-screen`}>
-        <Providers> {/* 👈 用 Providers 包裹 */}
+      <body className="bg-gray-950 text-white min-h-screen font-sans">
+        <Providers>
           <Toaster position="top-right" toastOptions={{ className: 'text-sm font-medium bg-gray-900 text-white border border-gray-800' }} />
           {children}
         </Providers>
