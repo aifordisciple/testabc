@@ -14,14 +14,12 @@ from app.services.knowledge_service import knowledge_service
 from app.services.sandbox import sandbox_service
 from app.models.user import Analysis, CopilotMessage
 
-# 1. 初始化 Celery 应用
 celery_app = Celery(
     "worker",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND
 )
 
-# 2. 配置 Celery
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -30,7 +28,6 @@ celery_app.conf.update(
     enable_utc=True,
 )
 
-# 定时任务：GEO 知识库同步
 celery_app.conf.beat_schedule = {
     "daily-geo-sync": {
         "task": "sync_recent_geo_datasets",
@@ -40,7 +37,7 @@ celery_app.conf.beat_schedule = {
 }
 
 # ==========================================
-# 任务 1：原有标准流程执行
+# 任务 1：原有标准流程执行 (UI 发起的普通任务)
 # ==========================================
 @celery_app.task(name="run_workflow_task", acks_late=True)
 def run_workflow_task(analysis_id: str):
@@ -61,100 +58,63 @@ def run_workflow_task(analysis_id: str):
 def sync_recent_geo_datasets(batch_size=15):
     print(f"🔄 [Cron Task] Starting GEO dataset synchronization (Batch size: {batch_size})...")
     datasets = geo_service.fetch_recent_datasets(retmax=batch_size)
-    if not datasets:
-        print("⚠️ [Cron Task] No datasets fetched. Aborting.")
-        return 0
+    if not datasets: return 0
         
     success_count = 0
     with Session(engine) as db:
         for ds in datasets:
             try:
                 knowledge_service.ingest_geo_dataset(
-                    db=db,
-                    accession=ds["accession"],
-                    raw_title=ds["title"],
-                    raw_summary=ds["summary"],
-                    url=ds["url"]
+                    db=db, accession=ds["accession"], raw_title=ds["title"],
+                    raw_summary=ds["summary"], url=ds["url"]
                 )
                 success_count += 1
             except Exception as e:
                 print(f"❌ [Cron Task] Error ingesting {ds['accession']}: {e}")
-                
-    print(f"✅ [Cron Task] GEO sync completed. Successfully processed {success_count}/{len(datasets)} datasets.")
     return success_count
 
 # ==========================================
-# 任务 3：AI 调用的 Nextflow 任务 (带回传聊天记录功能)
+# 🌟 任务 3：AI 调用的统一分析任务 (核心枢纽)
 # ==========================================
-@celery_app.task(name="run_nextflow_pipeline")
-def run_nextflow_pipeline(analysis_id: str, project_id: str, workflow_name: str, params: dict, session_id: str = "default"):
-    print(f"🚀 Starting background nextflow task {analysis_id}")
+@celery_app.task(name="run_ai_workflow_task")
+def run_ai_workflow_task(analysis_id: str, session_id: str = "default"):
+    """
+    此方法完美包裹了原有的 workflow_service.run_pipeline，
+    使其不仅能够处理 Nextflow，更能完美执行您库里的 TOOL (R/Perl脚本)，
+    最后将结果回传给聊天框。
+    """
+    print(f"🤖 [AI Celery] Starting unified workflow task {analysis_id}")
     
-    with Session(engine) as db:
-        analysis = db.get(Analysis, uuid.UUID(analysis_id))
-        if not analysis: return
-        analysis.status = "running"
-        
-        work_dir = os.path.join(workflow_service.base_work_dir, analysis_id)
-        os.makedirs(work_dir, exist_ok=True)
-        analysis.work_dir = work_dir
-        db.commit()
-
-    script_dir = os.path.join("/app/pipelines", workflow_name)
-    main_script = os.path.join(script_dir, "main.nf")
-    
-    if not os.path.exists(main_script):
-        with Session(engine) as db:
-            analysis = db.get(Analysis, uuid.UUID(analysis_id))
-            if analysis:
-                analysis.status = "failed"
-                db.commit()
-        return
-
-    cmd = ["nextflow", "run", main_script, "-with-docker", "ubuntu:20.04"]
-    for k, v in params.items():
-        if isinstance(v, bool):
-            if v: cmd.append(f"--{k}")
-        else:
-            cmd.extend([f"--{k}", str(v)])
-
-    log_file = os.path.join(work_dir, "analysis.log")
-    with open(log_file, "w") as f:
-        f.write(f"Running command: {' '.join(cmd)}\n")
-        f.write("="*50 + "\n")
-        
-        process = subprocess.Popen(
-            cmd, cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-        )
-        
-        # 修复点：严格缩进，读取输出写入日志
-        for line in process.stdout:
-            f.write(line)
-            f.flush()
+    try:
+        with Session(engine) as session:
+            analysis_uuid = uuid.UUID(analysis_id)
             
-        process.wait()
+            # 👇 核心：完全复用您写的完美代码！
+            workflow_service.run_pipeline(session, analysis_uuid)
+            
+            # 执行完毕，刷新状态，判断成败并推送给前端聊天框
+            session.refresh(session.get(Analysis, analysis_uuid))
+            analysis = session.get(Analysis, analysis_uuid)
+            success = (analysis.status == "completed")
+            workflow_name = analysis.workflow
+            project_id = analysis.project_id
+            
+            status_icon = "✅" if success else "❌"
+            md_msg = f"### {status_icon} Predefined Tool/Pipeline `{workflow_name}` Finished (ID: `{analysis_id[:8]}`)\n\n"
+            if success:
+                md_msg += "Execution completed successfully! The generated files are saved in the tool's result directory. Please check the **Files** tab."
+            else:
+                md_msg += "Execution failed. Please check the **Workflows** tab and click `✨ AI Diagnose` for details."
 
-    success = (process.returncode == 0)
-    
-    # 任务结束，更新状态并向前端回传聊天记录
-    with Session(engine) as db:
-        analysis = db.get(Analysis, uuid.UUID(analysis_id))
-        if analysis:
-            analysis.status = "completed" if success else "failed"
-        
-        status_icon = "✅" if success else "❌"
-        md_msg = f"### {status_icon} Pipeline `{workflow_name}` Finished (ID: `{analysis_id[:8]}`)\n\n"
-        if success:
-            md_msg += "Execution completed successfully! Please check the **Files** tab to view or download the generated HTML reports and results."
-        else:
-            md_msg += "Execution failed. Please check the **Workflows** tab and click `✨ AI Diagnose` for details."
-
-        msg = CopilotMessage(project_id=uuid.UUID(project_id), session_id=session_id, role="assistant", content=md_msg)
-        db.add(msg)
-        db.commit()
+            msg = CopilotMessage(project_id=project_id, session_id=session_id, role="assistant", content=md_msg)
+            session.add(msg)
+            session.commit()
+            
+    except Exception as e:
+        print(f"❌ [AI Celery] System error: {e}")
 
 # ==========================================
-# 任务 4：AI 调用的自定义沙箱任务 (带回传聊天记录功能)
+# 🌟 任务 4：AI 调用的自定义沙箱任务 (代码生成与画图)
 # ==========================================
 @celery_app.task(name="run_sandbox_task")
 def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, session_id: str = "default"):
@@ -186,12 +146,12 @@ DATA_DIR = '/data'
 WORK_DIR = '/workspace'
 os.chdir(WORK_DIR)
 """
+    # 这里调用了您完美的 execute_python！
     res = sandbox_service.execute_python(project_id, setup_code + "\n" + custom_code)
 
     with open(log_file, "a", encoding="utf-8") as f:
         if res['stdout']: f.write("STDOUT:\n" + res['stdout'] + "\n")
         if res['stderr']: f.write("STDERR:\n" + res['stderr'] + "\n")
-        if res['files']: f.write(f"\n✅ Generated Files: {[f['name'] for f in res['files']]}\n")
         f.write("\n\n🏁 Execution Finished.\n")
 
     # 任务结束，更新状态并向前端回传聊天记录及生成的文件列表
@@ -203,11 +163,17 @@ os.chdir(WORK_DIR)
         status_icon = "✅" if res['success'] else "❌"
         md_msg = f"### {status_icon} Sandbox Analysis Finished (ID: `{analysis_id[:8]}`)\n\n"
         
+        # 将生成的图片和文件列入聊天框
         if res['files']:
-            md_msg += "**Generated Results:**\n"
+            md_msg += "**Generated Results:**\n\n"
             for file_info in res['files']:
-                fname = file_info if isinstance(file_info, str) else file_info.get('name', str(file_info))
-                md_msg += f"- 📄 `{fname}` (Available in the **Files** tab)\n"
+                if isinstance(file_info, dict):
+                    if file_info.get("type") == "image":
+                        md_msg += f"![{file_info['name']}]({file_info['data']})\n\n"
+                    else:
+                        md_msg += f"- 📄 `{file_info['name']}` (Saved in Files tab)\n"
+                else:
+                    md_msg += f"- 📄 `{file_info}`\n"
         
         if res['stdout']:
             out = res['stdout'][:1000] + ('...' if len(res['stdout'])>1000 else '')
