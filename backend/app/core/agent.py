@@ -15,7 +15,6 @@ def get_llm():
 def run_copilot_planner(project_id: str, history: List[Dict[str, Any]], available_workflows: str, project_files: str) -> Dict[str, Any]:
     llm = get_llm()
 
-    # 👇 强化路由逻辑，明确告知 AI 有预设的 TOOL 可以使用
     system_prompt = SystemMessage(content=f"""You are Bio-Copilot, an expert bioinformatics routing and planning assistant.
 Your job is to listen to the user, analyze their request, and PROPOSE an analysis plan.
 
@@ -30,12 +29,13 @@ CRITICAL RULES:
 1. GENERAL QUERIES: If the user asks "what files do I have" or general biology questions, ANSWER DIRECTLY based on the [PROJECT CONTEXT]. DO NOT propose a plan.
 2. TOOL CALLING: Use `propose_analysis_plan` ONLY when the user asks to run pipelines, process data, or generate plots.
 3. ROUTING PRIORITY (CRITICAL): 
-   - Check the [AVAILABLE PREDEFINED WORKFLOWS & TOOLS] carefully. 
-   - If the user's request matches the functionality of ANY tool or pipeline in the list (e.g., they ask for a heatmap and there is a heatmap tool), YOU MUST select 'method': 'workflow' and output its EXACT name.
-   - DO NOT write custom sandbox code for something an existing tool can already do!
+   - Check the [AVAILABLE PREDEFINED WORKFLOWS & TOOLS] carefully.
+   - If AND ONLY IF the user's request matches a tool perfectly, set 'method' to 'workflow' and set 'workflow_name' to the EXACT name from the list.
 4. CUSTOM CODE (FALLBACK): 
-   - Only if NO existing tool/pipeline matches the request, select 'method': 'sandbox' and write Python code.
-   - Read data from '/data' and save plots to '/workspace/result.png'.
+   - If there is NO matching tool in the list, YOU MUST set 'method' to 'sandbox' and write custom Python code.
+   - DO NOT set 'method' to 'workflow' if you cannot find a match.
+   - NEVER output 'None' or 'null' for workflow_name.
+   - When using 'sandbox', read data from '/data' and save plots to '/workspace/result.png'.
 """)
 
     formatted_msgs = [system_prompt]
@@ -55,7 +55,7 @@ CRITICAL RULES:
                 "properties": {
                     "strategy": {"type": "string", "description": "Clear explanation of the strategy."},
                     "method": {"type": "string", "enum": ["workflow", "sandbox"], "description": "Use 'workflow' for existing tools/pipelines, 'sandbox' for custom code."},
-                    "workflow_name": {"type": "string", "description": "If workflow, the exact name of the script/tool."},
+                    "workflow_name": {"type": "string", "description": "If workflow, the exact name of the script/tool. Cannot be None."},
                     "custom_code": {"type": "string", "description": "If sandbox, the complete Python code to execute."},
                     "parameters": {"type": "object", "description": "If workflow, parameters matching the tool's schema."}
                 },

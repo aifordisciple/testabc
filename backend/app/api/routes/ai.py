@@ -8,7 +8,6 @@ from pydantic import BaseModel
 
 from app.core.db import get_session
 from app.api.deps import get_current_user
-# 👇 引入 SampleSheet
 from app.models.user import User, Project, Analysis, CopilotMessage, File, ProjectFileLink, SampleSheet
 from app.models.bio import WorkflowTemplate
 from app.core.agent import run_copilot_planner
@@ -107,19 +106,28 @@ def execute_plan(
     method = plan.get("method")
     workflow_name = plan.get("workflow_name")
     
-    if method == "workflow" and not workflow_name:
-        raise HTTPException(status_code=400, detail="AI provided an invalid or empty workflow name. Please ask the AI to write a custom sandbox script instead.")
-
-    # 👇 核心修复：自动给 Pipeline 分配样本表，给 Tool 放行
     auto_sample_sheet_id = None
+    
     if method == "workflow":
+        # 👇 拦截 1：如果大模型传来了 "None" 字符串或者空值，直接报错
+        if not workflow_name or str(workflow_name).strip().lower() in ["none", "null", ""]:
+            raise HTTPException(
+                status_code=400, 
+                detail="AI returned an invalid workflow name ('None'). Please reply to AI: 'There is no such workflow, please use sandbox to write custom python code.'"
+            )
+            
+        # 👇 拦截 2：去数据库里查这个工具。如果大模型瞎编了一个名字，直接报错
         template = session.exec(select(WorkflowTemplate).where(WorkflowTemplate.script_path == workflow_name)).first()
-        
-        # 默认它是 PIPELINE，除非它的 workflow_type 明确写了是 TOOL
-        is_pipeline = not template or template.workflow_type != "TOOL"
+        if not template:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"The tool '{workflow_name}' does not exist in the system. Please reply to AI: 'Tool not found, please use sandbox to generate code.'"
+            )
+            
+        # 👇 只有确定找到了模板，再去判断是不是 Pipeline 从而要不要挂载 SampleSheet
+        is_pipeline = (template.workflow_type != "TOOL")
         
         if is_pipeline:
-            # 去数据库查找该项目下最新创建的一个 SampleSheet
             latest_sheet = session.exec(
                 select(SampleSheet)
                 .where(SampleSheet.project_id == project_id)
@@ -129,10 +137,9 @@ def execute_plan(
             if latest_sheet:
                 auto_sample_sheet_id = latest_sheet.id
             else:
-                # 如果没找到，抛出异常阻断执行，并提示用户
                 raise HTTPException(
                     status_code=400, 
-                    detail=f"Pipeline '{workflow_name}' requires a SampleSheet. Please go to the 'Data' tab and group your fastq files into a SampleSheet first."
+                    detail=f"Pipeline '{workflow_name}' requires a SampleSheet. Please go to the 'Data' tab and create one."
                 )
 
     analysis = Analysis(
@@ -140,7 +147,7 @@ def execute_plan(
         workflow=workflow_name if method == "workflow" else "custom_sandbox_analysis",
         status="pending",
         params_json=json.dumps(plan.get("parameters", {})) if method == "workflow" else "{}",
-        sample_sheet_id=auto_sample_sheet_id  # 👈 将自动获取的 ID 挂载上去
+        sample_sheet_id=auto_sample_sheet_id
     )
     session.add(analysis)
     session.commit()
@@ -162,6 +169,7 @@ def execute_plan(
 
     return {"status": "success", "analysis_id": str(analysis.id)}
 
+# (保留诊断功能)
 class DiagnoseResponse(BaseModel):
     diagnosis: str
 
