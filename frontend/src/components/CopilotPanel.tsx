@@ -2,423 +2,258 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import toast from 'react-hot-toast';
 
 interface CopilotPanelProps {
   projectId: string;
-  onTaskCreated?: (analysisId: string) => void;
 }
 
-interface MessageFile {
-  type: string;
-  name: string;
-  data?: string;
-  content?: string;
-}
-
-interface WorkflowMatch {
-  template_id: string;
-  template_name: string;
-  description: string;
-  workflow_type: string;
-  match_score: number;
-  match_reason: string;
-  inferred_params: Record<string, any>;
-  params_schema: Record<string, any>;
-}
-
-interface CopilotResponse {
-  mode: 'workflow_match' | 'code_generation' | 'clarification_needed' | 'query_result' | 'error';
-  matched_workflows?: WorkflowMatch[];
-  generated_code?: string;
-  generated_schema?: string;
-  generated_description?: string;
-  explanation: string;
-  follow_up_questions?: string[];
-  available_sample_sheets?: { id: string; name: string; description?: string }[];
-}
-
-interface Message {
-  id: string;
+interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
-  files?: MessageFile[];
-  response?: CopilotResponse;
-  selectedWorkflow?: WorkflowMatch;
-  params?: Record<string, any>;
-  sampleSheetId?: string;
+  plan_data?: string | null;
 }
 
-interface Conversation {
-  id: string;
-  title: string;
-  summary?: string;
-  created_at: string;
-  updated_at: string;
-  message_count: number;
-}
-
-const STORAGE_KEY = 'copilot-current-';
-
-export default function CopilotPanel({ projectId, onTaskCreated }: CopilotPanelProps) {
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [currentId, setCurrentId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
+export default function CopilotPanel({ projectId }: CopilotPanelProps) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [executingId, setExecutingId] = useState<string | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [loaded, setLoaded] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const api = process.env.NEXT_PUBLIC_API_URL || '';
+  // 👇 会话管理状态
+  const [sessions, setSessions] = useState<string[]>(['default']);
+  const [currentSession, setCurrentSession] = useState('default');
+  
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const prevMsgCountRef = useRef(0);
 
-  const getHeaders = useCallback(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : '';
-    return {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`
-    };
-  }, []);
-
-  const loadConversations = useCallback(async () => {
+  // 1. 获取会话列表
+  const fetchSessions = useCallback(async () => {
     try {
-      const res = await fetch(`${api}/conversations/projects/${projectId}/conversations`, {
-        headers: getHeaders()
+      const token = localStorage.getItem('token');
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/sessions`, {
+        headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
-        const data: Conversation[] = await res.json();
-        setConversations(data);
-        
-        const saved = localStorage.getItem(STORAGE_KEY + projectId);
-        const exists = data.find(c => c.id === saved);
-        const targetId = exists ? saved : data[0]?.id || null;
-        
-        if (targetId) {
-          setCurrentId(targetId);
+        const data = await res.json();
+        setSessions(data.sessions);
+        if (!currentSession || !data.sessions.includes(currentSession)) {
+          setCurrentSession(data.sessions[0] || 'default');
         }
       }
-    } catch (e) {
-      console.error('Load conversations error:', e);
-    } finally {
-      setLoaded(true);
-    }
-  }, [projectId, api, getHeaders]);
+    } catch (e) { console.error(e); }
+  }, [projectId]);
 
-  const loadMessages = useCallback(async (convId: string) => {
+  // 2. 获取当前会话历史
+  const fetchHistory = useCallback(async () => {
     try {
-      const res = await fetch(`${api}/conversations/conversations/${convId}`, {
-        headers: getHeaders()
+      const token = localStorage.getItem('token');
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/history?session_id=${currentSession}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
         const data = await res.json();
-        const msgs: Message[] = (data.messages || []).map((m: any) => ({
-          id: m.id,
-          role: m.role,
-          content: m.content,
-          response: m.response_data,
-          files: m.files,
-          selectedWorkflow: m.response_data?.matched_workflows?.[0],
-          params: m.response_data?.matched_workflows?.[0]?.inferred_params || {},
-          sampleSheetId: m.response_data?.available_sample_sheets?.[0]?.id
-        }));
-        setMessages(msgs);
+        setMessages(data);
       }
-    } catch (e) {
-      console.error('Load messages error:', e);
+    } catch (e) { console.error(e); }
+  }, [projectId, currentSession]);
+
+  // 3. 核心：每5秒轮询一次历史，实现"后台任务结果自动蹦出来"的效果
+  useEffect(() => {
+    const interval = setInterval(fetchHistory, 5000);
+    return () => clearInterval(interval);
+  }, [fetchHistory]);
+
+  // 初始化
+  useEffect(() => {
+    fetchSessions();
+    fetchHistory();
+  }, [fetchSessions, fetchHistory]);
+
+  // 自动滚动到底部
+  useEffect(() => {
+    if (messages.length > prevMsgCountRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      prevMsgCountRef.current = messages.length;
     }
-  }, [api, getHeaders]);
-
-  useEffect(() => {
-    loadConversations();
-  }, [loadConversations]);
-
-  useEffect(() => {
-    if (currentId && loaded) {
-      loadMessages(currentId);
-      localStorage.setItem(STORAGE_KEY + projectId, currentId);
-    }
-  }, [currentId, loaded, loadMessages, projectId]);
-
-  useEffect(() => {
-    scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const saveMessage = async (role: string, content: string, response?: CopilotResponse) => {
-    if (!currentId) return;
-    try {
-      await fetch(`${api}/conversations/conversations/${currentId}/messages`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ role, content, response_mode: response?.mode, response_data: response })
-      });
-    } catch (e) {
-      console.error('Save message error:', e);
-    }
+  const handleNewSession = () => {
+    const newId = `chat-${Date.now()}`;
+    setSessions(prev => [newId, ...prev]);
+    setCurrentSession(newId);
+    setMessages([]);
+    prevMsgCountRef.current = 0;
   };
 
-  const createConversation = async () => {
-    try {
-      const res = await fetch(`${api}/conversations/projects/${projectId}/conversations`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ project_id: projectId, title: '新对话' })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setConversations(prev => [data, ...prev]);
-        setCurrentId(data.id);
-        setMessages([{
-          id: 'welcome-' + data.id,
-          role: 'assistant',
-          content: `👋 **新对话已创建！**\n\n我可以帮你分析数据或运行生信流程。`
-        }]);
-      }
-    } catch (e) {
-      toast.error('创建对话失败');
-    }
-  };
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || isLoading) return;
 
-  const deleteConversation = async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!confirm('删除此对话？')) return;
-    try {
-      await fetch(`${api}/conversations/conversations/${id}`, { method: 'DELETE', headers: getHeaders() });
-      const remaining = conversations.filter(c => c.id !== id);
-      setConversations(remaining);
-      if (currentId === id) {
-        const nextId = remaining[0]?.id || null;
-        setCurrentId(nextId);
-        if (!nextId) setMessages([]);
-      }
-    } catch (e) {
-      toast.error('删除失败');
-    }
-  };
-
-  const handleAnalyze = async () => {
-    if (!input.trim() || loading) return;
-    
-    if (!currentId) {
-      await createConversation();
-      const savedInput = input;
-      setInput('');
-      setTimeout(() => { setInput(savedInput); handleAnalyze(); }, 400);
-      return;
-    }
-
-    const userMsg: Message = { id: Date.now().toString(), role: 'user', content: input };
-    setMessages(prev => [...prev, userMsg]);
-    const query = input;
+    const userMsg = input;
     setInput('');
-    setLoading(true);
-
-    await saveMessage('user', query);
+    setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+    setIsLoading(true);
 
     try {
-      const res = await fetch(`${api}/ai/projects/${projectId}/copilot/analyze`, {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat`, {
         method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ query })
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ message: userMsg, session_id: currentSession })
       });
-      
-      if (!res.ok) throw new Error((await res.json()).detail || 'Error');
-      
-      const data: CopilotResponse = await res.json();
-      const assistantMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: data.explanation,
-        response: data,
-        selectedWorkflow: data.matched_workflows?.[0],
-        params: data.matched_workflows?.[0]?.inferred_params || {},
-        sampleSheetId: data.available_sample_sheets?.[0]?.id
-      };
-      
-      setMessages(prev => [...prev, assistantMsg]);
-      await saveMessage('assistant', data.explanation, data);
-    } catch (e: any) {
-      toast.error(e.message);
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: `❌ ${e.message}` }]);
+
+      if (!res.ok) throw new Error('API Error');
+      await fetchHistory(); // 发送完立即刷新获取最新内容
+    } catch (error) {
+      setMessages(prev => [...prev, { role: 'assistant', content: "❌ **Error**: Connection failed." }]);
     } finally {
-      setLoading(false);
+      setIsLoading(false);
     }
   };
 
-  const handleExecute = async (msg: Message) => {
-    if (!msg.response || executingId) return;
-    setExecutingId(msg.id);
-    
+  const handleConfirmPlan = async (planDataStr: string) => {
+    const toastId = toast.loading('Submitting task to cluster...');
     try {
-      const payload: any = { mode: msg.response.mode, sample_sheet_id: msg.sampleSheetId, params: msg.params || {} };
+      const token = localStorage.getItem('token');
+      const plan = JSON.parse(planDataStr);
       
-      if (msg.response.mode === 'workflow_match' && msg.selectedWorkflow) {
-        payload.template_id = msg.selectedWorkflow.template_id;
-      } else if (msg.response.mode === 'code_generation') {
-        payload.generated_code = msg.response.generated_code;
-        payload.generated_schema = msg.response.generated_schema;
-        payload.workflow_name = msg.response.generated_description || 'Custom';
-      }
-      
-      const res = await fetch(`${api}/ai/projects/${projectId}/copilot/execute`, {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/execute-plan`, {
         method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify(payload)
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ plan_data: plan, session_id: currentSession })
       });
+      if (!res.ok) throw new Error('Failed to execute plan');
       
-      if (!res.ok) throw new Error((await res.json()).detail || 'Error');
-      
-      const data = await res.json();
-      toast.success('任务已创建！');
-      
-      const successMsg: Message = { id: Date.now().toString(), role: 'assistant', content: `✅ 任务已创建\n\nID: \`${data.analysis_id}\`\n流程: ${data.workflow}` };
-      setMessages(prev => [...prev, successMsg]);
-      await saveMessage('assistant', successMsg.content);
-      
-      onTaskCreated?.(data.analysis_id);
+      toast.success('Task submitted successfully!', { id: toastId });
+      await fetchHistory(); // 刷新获取确认消息
     } catch (e: any) {
-      toast.error(e.message);
-    } finally {
-      setExecutingId(null);
+      toast.error(`Error: ${e.message}`, { id: toastId });
     }
   };
 
-  const selectWorkflow = (msgId: string, wf: WorkflowMatch) => {
-    setMessages(prev => prev.map(m => m.id === msgId ? { ...m, selectedWorkflow: wf, params: wf.inferred_params || {} } : m));
-  };
+  // 渲染漂亮的方案卡片
+  const renderPlanCard = (planDataStr: string) => {
+    let plan;
+    try { plan = JSON.parse(planDataStr); } catch { return null; }
 
-  const setParam = (msgId: string, key: string, value: any) => {
-    setMessages(prev => prev.map(m => m.id === msgId ? { ...m, params: { ...m.params, [key]: value } } : m));
-  };
-
-  const setSampleSheet = (msgId: string, id: string) => {
-    setMessages(prev => prev.map(m => m.id === msgId ? { ...m, sampleSheetId: id } : m));
-  };
-
-  const renderWorkflowUI = (msg: Message) => {
-    if (!msg.response || msg.response.mode !== 'workflow_match') return null;
-    const { matched_workflows, available_sample_sheets } = msg.response;
-    
     return (
-      <div className="mt-4 space-y-3">
-        {matched_workflows?.map(wf => (
-          <div key={wf.template_id} onClick={() => selectWorkflow(msg.id, wf)}
-            className={`p-3 rounded-lg border cursor-pointer ${msg.selectedWorkflow?.template_id === wf.template_id ? 'border-emerald-500 bg-emerald-500/10' : 'border-gray-700 hover:border-gray-600'}`}>
-            <div className="flex justify-between text-sm">
-              <span className="text-white">{wf.template_name}</span>
-              <span className={wf.match_score >= 0.8 ? 'text-emerald-400' : 'text-yellow-400'}>{Math.round(wf.match_score * 100)}%</span>
-            </div>
-            <p className="text-xs text-gray-400 mt-1">{wf.description}</p>
-          </div>
-        ))}
-        
-        {available_sample_sheets && available_sample_sheets.length > 0 && (
-          <select value={msg.sampleSheetId || ''} onChange={e => setSampleSheet(msg.id, e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white">
-            {available_sample_sheets.map(ss => <option key={ss.id} value={ss.id}>{ss.name}</option>)}
-          </select>
-        )}
-        
-        {msg.selectedWorkflow?.params_schema?.properties && (
-          <div className="space-y-2 bg-gray-800/50 p-3 rounded-lg">
-            {Object.entries(msg.selectedWorkflow.params_schema.properties).map(([key, schema]: [string, any]) => (
-              <div key={key} className="flex items-center gap-2 text-sm">
-                <label className="text-gray-400 w-28">{schema.title || key}</label>
-                {schema.type === 'boolean' ? (
-                  <input type="checkbox" checked={msg.params?.[key] ?? schema.default ?? false} onChange={e => setParam(msg.id, key, e.target.checked)} />
-                ) : (
-                  <input type="text" value={msg.params?.[key] ?? schema.default ?? ''} onChange={e => setParam(msg.id, key, e.target.value)}
-                    className="flex-1 bg-gray-700 rounded px-2 py-1 text-white" />
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-        
-        <button onClick={() => handleExecute(msg)} disabled={executingId === msg.id}
-          className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 text-white py-2 rounded-lg">
-          {executingId === msg.id ? '执行中...' : '🚀 确认执行'}
-        </button>
+      <div className="mt-4 bg-gray-900 border border-emerald-900/50 rounded-xl p-5 shadow-lg relative overflow-hidden">
+         <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
+         <h4 className="text-lg font-bold text-white mb-2 flex items-center gap-2">
+            📋 Analysis Strategy Proposal
+         </h4>
+         <p className="text-gray-300 text-sm mb-4 leading-relaxed">{plan.strategy}</p>
+         
+         <div className="bg-gray-950 rounded border border-gray-800 p-3 mb-5">
+            <div className="text-xs text-gray-500 uppercase font-bold mb-1 tracking-wider">Routing Details</div>
+            {plan.method === 'workflow' ? (
+                <div>
+                   <span className="text-blue-400 font-medium">Standard Workflow ➔ </span>
+                   <span className="text-white">{plan.workflow_name}</span>
+                </div>
+            ) : (
+                <div>
+                   <span className="text-purple-400 font-medium">Custom Sandbox Code ➔ </span>
+                   <span className="text-white">Python Data Science Env</span>
+                   <div className="mt-2 p-2 bg-[#0d1117] rounded text-xs text-green-400 font-mono overflow-x-auto max-h-48">
+                     {plan.custom_code?.slice(0, 150)}...
+                   </div>
+                </div>
+            )}
+         </div>
+
+         <div className="flex gap-3">
+            <button onClick={() => handleConfirmPlan(planDataStr)} className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                Confirm & Execute
+            </button>
+            <button className="bg-gray-800 hover:bg-gray-700 text-gray-300 px-4 py-2 rounded-lg text-sm transition-colors border border-gray-700">
+                Modify Request
+            </button>
+         </div>
       </div>
     );
-  };
-
-  const renderCodeUI = (msg: Message) => {
-    if (!msg.response || msg.response.mode !== 'code_generation') return null;
-    return (
-      <div className="mt-4 space-y-3">
-        <pre className="bg-gray-950 border border-gray-700 rounded p-3 text-xs text-gray-300 max-h-40 overflow-auto">{msg.response.generated_code}</pre>
-        <button onClick={() => handleExecute(msg)} disabled={executingId === msg.id}
-          className="w-full bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 text-white py-2 rounded-lg">
-          {executingId === msg.id ? '执行中...' : '🚀 执行'}
-        </button>
-      </div>
-    );
-  };
-
-  const formatDate = (d: string) => {
-    const diff = Math.floor((Date.now() - new Date(d).getTime()) / 86400000);
-    return diff === 0 ? '今天' : diff === 1 ? '昨天' : `${diff}天前`;
   };
 
   return (
-    <div className="flex h-full bg-gray-900 rounded-xl overflow-hidden">
-      {sidebarOpen && (
-        <div className="w-60 bg-gray-950 border-r border-gray-800 flex flex-col flex-shrink-0">
-          <div className="p-3 border-b border-gray-800">
-            <button onClick={createConversation} className="w-full bg-purple-600 hover:bg-purple-500 text-white py-2 rounded-lg text-sm">+ 新对话</button>
-          </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-1">
-            {!loaded ? <div className="text-gray-500 text-sm text-center py-8">加载中...</div> :
-             conversations.length === 0 ? <div className="text-gray-500 text-sm text-center py-8">暂无对话</div> :
-             conversations.map(c => (
-              <div key={c.id} onClick={() => setCurrentId(c.id)}
-                className={`group relative p-3 rounded-lg cursor-pointer ${currentId === c.id ? 'bg-gray-800 border border-gray-700' : 'hover:bg-gray-800/50'}`}>
-                <div className="text-sm text-white truncate pr-5">{c.title}</div>
-                <div className="text-xs text-gray-500">{formatDate(c.updated_at)} · {c.message_count}条</div>
-                <button onClick={e => deleteConversation(c.id, e)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 text-lg">×</button>
-              </div>
-            ))}
-          </div>
+    <div className="flex flex-col h-full bg-[#0d1117]">
+      <div className="p-4 border-b border-gray-800 bg-gray-900/50 flex justify-between items-center shadow-sm">
+        <span className="text-2xl animate-pulse">✨</span>
+        <div>
+          <h3 className="font-bold text-white text-lg">Bio-Copilot</h3>
+          <p className="text-xs text-blue-400 font-medium">Your AI Bioinformatics Planner</p>
         </div>
-      )}
-      
-      <div className="flex-1 flex flex-col min-w-0">
-        <div className="flex items-center px-4 py-2 border-b border-gray-800">
-          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="text-gray-400 hover:text-white mr-4">{sidebarOpen ? '◀' : '▶'}</button>
-          <span className="text-sm text-gray-400 truncate">{conversations.find(c => c.id === currentId)?.title || 'Bio-Copilot'}</span>
+        {/* 👇 新增的多会话选择器 */}
+        <div className="flex items-center gap-3">
+          <select 
+            className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-1.5 outline-none focus:border-blue-500"
+            value={currentSession}
+            onChange={(e) => { setCurrentSession(e.target.value); prevMsgCountRef.current=0; }}
+          >
+            {sessions.map(s => <option key={s} value={s}>{s === 'default' ? 'Main Session' : `Chat (${s.slice(-6)})`}</option>)}
+          </select>
+          <button onClick={handleNewSession} className="bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 text-xs px-3 py-1.5 rounded-lg border border-blue-900/50 transition-colors">
+            + New
+          </button>
         </div>
-        
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {!loaded ? <div className="text-center text-gray-500 py-8">加载中...</div> :
-           messages.length === 0 ? <div className="text-center text-gray-500 py-8">🤖 点击"新对话"开始</div> :
-           messages.map(m => (
-            <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[85%] p-3 rounded-xl ${m.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-800 border border-gray-700'}`}>
-                <div className="text-sm prose prose-invert prose-sm max-w-none [&_table]:w-full [&_th]:border-b [&_th]:p-2 [&_td]:border-b [&_td]:p-2">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
+        {messages.length === 0 ? (
+          <div className="h-full flex flex-col items-center justify-center text-center opacity-50">
+            <span className="text-5xl mb-4">🧬</span>
+            <p className="text-gray-400">Hello! I can route workflows or write custom scripts.</p>
+            <p className="text-gray-500 text-sm mt-2">Try: "Help me run QC on my RNA-seq files" or "Plot a scatter graph from data.csv"</p>
+          </div>
+        ) : (
+          messages.map((msg, idx) => (
+            <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-2`}>
+              <div className={`max-w-[85%] rounded-2xl px-5 py-3 ${
+                msg.role === 'user' 
+                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' 
+                  : 'bg-gray-800 text-gray-200 border border-gray-700 shadow-md'
+              }`}>
+                <div className={`prose prose-sm max-w-none ${msg.role === 'user' ? 'prose-invert' : 'prose-invert prose-blue'}`}>
+                  <ReactMarkdown>{msg.content}</ReactMarkdown>
                 </div>
-                {m.role === 'assistant' && m.response?.mode === 'workflow_match' && renderWorkflowUI(m)}
-                {m.role === 'assistant' && m.response?.mode === 'code_generation' && renderCodeUI(m)}
-                {m.role === 'assistant' && m.response?.mode === 'clarification_needed' && m.response.follow_up_questions && (
-                  <div className="mt-3 text-sm text-yellow-400">
-                    {m.response.follow_up_questions.map((q, i) => <div key={i}>• {q}</div>)}
-                  </div>
-                )}
+                
+                {msg.plan_data && renderPlanCard(msg.plan_data)}
               </div>
             </div>
-          ))}
-          {loading && <div className="text-gray-400 text-sm">AI 思考中...</div>}
-          <div ref={scrollRef} />
-        </div>
+          ))
+        )}
         
-        <div className="p-3 border-t border-gray-800 flex gap-2">
-          <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleAnalyze())}
-            placeholder="描述分析需求..." className="flex-1 bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white resize-none" rows={2} disabled={loading} />
-          <button onClick={handleAnalyze} disabled={!input.trim() || loading} className="bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 text-white px-4 rounded-lg">发送</button>
-        </div>
+        {isLoading && (
+          <div className="flex justify-start">
+            <div className="bg-gray-800 border border-gray-700 rounded-2xl px-5 py-4 flex items-center gap-3">
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+              </span>
+              <span className="text-gray-400 text-sm animate-pulse">Analyzing requirement and planning...</span>
+            </div>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      <div className="p-4 bg-gray-900 border-t border-gray-800">
+        <form onSubmit={handleSend} className="relative max-w-4xl mx-auto flex items-end bg-[#0f1218] border border-gray-700 rounded-xl overflow-hidden focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500 transition-all shadow-inner">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
+            placeholder="E.g., What files do I have? OR Plot a PCA scatter plot from data.csv..."
+            className="w-full bg-transparent text-white px-4 py-4 max-h-32 outline-none resize-none placeholder-gray-500 text-sm"
+            rows={1}
+          />
+          <div className="p-2 flex-shrink-0">
+            <button type="submit" disabled={!input.trim() || isLoading} className="p-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg transition-colors shadow-md">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" /></svg>
+            </button>
+          </div>
+        </form>
+        <div className="text-center mt-2"><span className="text-[10px] text-gray-500">Shift + Enter for new line. AI can make mistakes. Check output.</span></div>
       </div>
     </div>
   );

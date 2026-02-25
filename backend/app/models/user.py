@@ -202,3 +202,23 @@ class AnalysisPublic(AnalysisBase):
     start_time: datetime
     sample_sheet_id: Optional[uuid.UUID]
     workflow: str
+
+# =======================
+# 7. Copilot 消息模型 (CopilotMessage)
+# =======================
+class CopilotMessage(SQLModel, table=True):
+    __tablename__ = "copilot_message"
+    
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    project_id: uuid.UUID = Field(foreign_key="project.id", index=True)
+    
+    # 👇 新增：用于区分同一个项目下的不同对话/会话
+    session_id: str = Field(default="default", index=True)
+    
+    role: str = Field(..., description="'user', 'assistant' 等")
+    content: str = Field(..., description="消息内容")
+    
+    # 如果 AI 提出了一套分析方案，这里存储结构化的 JSON
+    plan_data: Optional[str] = Field(default=None, description="AI 提出的分析方案 JSON")
+    
+    created_at: datetime = Field(default_factory=datetime.utcnow)
