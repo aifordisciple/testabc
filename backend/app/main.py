@@ -7,8 +7,8 @@ from sqlmodel import select
 
 from app.core.config import settings
 from app.core.db import init_db, get_session
-# 👇 1. 在这里补充导入 knowledge 路由
-from app.api.routes import auth, files, workflow, admin, ai, knowledge, conversations, conversations
+# 👇 修复点 1：清理了错误重复的 conversations 导入
+from app.api.routes import auth, files, workflow, admin, ai, knowledge
 from app.models.bio import WorkflowTemplate
 
 # === 数据预置 (Seeding) ===
@@ -17,7 +17,6 @@ def seed_initial_workflows():
     from sqlmodel import Session
     
     with Session(engine) as session:
-        # 检查是否已存在 RNA-Seq QC
         existing = session.exec(select(WorkflowTemplate).where(WorkflowTemplate.script_path == "rnaseq_qc")).first()
         if not existing:
             print("🌱 Seeding initial workflow: RNA-Seq QC")
@@ -27,7 +26,6 @@ def seed_initial_workflows():
                 category="Analysis",
                 subcategory="Quality Control",
                 script_path="rnaseq_qc",
-                # 定义参数 Schema (JSON)
                 params_schema="""
                 {
                     "type": "object",
@@ -56,13 +54,10 @@ async def lifespan(app: FastAPI):
     try:
         init_db()
         print("✅ Database initialized successfully.")
-        
-        # 2. 执行数据预置
         try:
             seed_initial_workflows()
         except Exception as e:
-            print(f"⚠️ Seeding failed (might be expected if table not ready): {e}")
-            
+            print(f"⚠️ Seeding failed: {e}")
     except Exception as e:
         print(f"❌ Database initialization failed: {e}")
     yield
@@ -90,10 +85,7 @@ app.include_router(files.router, prefix=f"{settings.API_V1_STR}/files", tags=["F
 app.include_router(workflow.router, prefix=f"{settings.API_V1_STR}/workflow", tags=["Workflow"])
 app.include_router(admin.router, prefix=f"{settings.API_V1_STR}/admin", tags=["Admin"])
 app.include_router(ai.router, prefix=f"{settings.API_V1_STR}/ai", tags=["AI"]) 
-# 👇 2. 在这里注册 Knowledge 路由
 app.include_router(knowledge.router, prefix=f"{settings.API_V1_STR}/knowledge", tags=["Knowledge"])
-# 👇 3. 注册 Conversations 路由
-app.include_router(conversations.router, prefix=f"{settings.API_V1_STR}/conversations", tags=["Conversations"])
 
 @app.get("/")
 def root():

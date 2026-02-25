@@ -159,7 +159,7 @@ def diagnose_analysis_error(
     project = session.get(Project, project_id)
     if not project or project.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Project not found")
-    analysis = session.get(, Analysis, analysis_id)
+    analysis = session.get(Analysis, analysis_id)
     if not analysis or analysis.project_id != project_id:
         raise HTTPException(status_code=404, detail="Analysis not found")
         
