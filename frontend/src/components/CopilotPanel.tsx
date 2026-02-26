@@ -136,30 +136,43 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
     fetchSessions();
   }, [projectId]);
 
+  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const isPollingRef = useRef(false);
+
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    
-    const startPolling = async () => {
+    const startSmartPolling = async () => {
+      if (isPollingRef.current) return;
+      
       const hasPending = await checkPendingTasks();
       if (hasPending) {
         fetchRecentMessages();
-        interval = setInterval(async () => {
+        isPollingRef.current = true;
+        
+        pollingRef.current = setInterval(async () => {
           const stillPending = await checkPendingTasks();
           if (stillPending) {
             fetchRecentMessages();
           } else {
-            clearInterval(interval);
+            if (pollingRef.current) {
+              clearInterval(pollingRef.current);
+              pollingRef.current = null;
+            }
+            isPollingRef.current = false;
           }
         }, 5000);
       }
     };
     
-    startPolling();
+    startSmartPolling();
     
     return () => {
-      if (interval) clearInterval(interval);
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+      isPollingRef.current = false;
     };
-  }, [projectId, currentSession, checkPendingTasks, fetchRecentMessages]);
+  }, [projectId, currentSession]);
 
   useEffect(() => {
     if (messages.length > prevMsgCountRef.current) {
