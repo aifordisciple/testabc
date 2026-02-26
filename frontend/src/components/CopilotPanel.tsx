@@ -197,55 +197,30 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
     }
   };
 
-  const handleConfirmPlan = async (planDataStr: string) =>    const toastId = toast.loading('Submitting task to cluster...')
+  const handleConfirmPlan = async (planDataStr: string) => {
+    const toastId = toast.loading('Submitting task to cluster...');
     try {
-        const token = localStorage.getItem('token')
-        const plan = JSON.parse(planDataStr)
-        const planType = plan.type || 'single'
-        
-        if (planType === 'multi') {
-            const res = await fetch(
-                `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/execute-chain`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                    body: JSON.stringify({ plan_data: plan, session_id: currentSession })
-                })
-                
-                if (!res.ok) {
-                    const errData = await res.json()
-                    throw new Error(errData.detail || 'Failed to execute chain')
-                }
-                
-                toast.success('Task chain submitted successfully!', { id: toastId })
-            } catch (e: any) {
-                toast.error(e.message, { id: toastId, duration: 6000 })
-            }
-        } else        
-        const toastId = toast.loading('Submitting task to cluster...')
-        try {
-            const token = localStorage.getItem('token')
-            const plan = JSON.parse(planDataStr)
-            
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/execute-plan`,                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                body: JSON.stringify({ plan_data: plan, session_id: currentSession })
-            })
-            
-            if (!res.ok) {
-                const errData = await res.json()
-                throw new Error(errData.detail || 'Failed to execute plan')
-            }
-            
-            toast.success('Task submitted successfully!', { id: toastId })
-            await fetchHistory() 
-        } catch (e: any) {
-            toast.error(e.message, { id: toastId, duration: 6000 })
-        }
-    }
-
+      const token = localStorage.getItem('token');
+      const plan = JSON.parse(planDataStr);
+      const planType = plan.type || 'single';
       
-      toast.success('Task submitted successfully!', { id: toastId });
+      let endpoint = `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/execute-plan`;
+      if (planType === 'multi') {
+        endpoint = `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/execute-chain`;
+      }
+      
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ plan_data: plan, session_id: currentSession })
+      });
+      
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || 'Failed to execute plan');
+      }
+      
+      toast.success(planType === 'multi' ? 'Task chain submitted successfully!' : 'Task submitted successfully!', { id: toastId });
       await fetchHistory(); 
     } catch (e: any) {
       toast.error(e.message, { id: toastId, duration: 6000 });
@@ -382,6 +357,9 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
   const renderPlanCard = (planDataStr: string) => {
     let plan;
     try { plan = JSON.parse(planDataStr); } catch { return null; }
+    
+    const planType = plan.type || 'single';
+    const isMultiStep = planType === 'multi';
 
     return (
       <div className="mt-4 bg-gradient-to-br from-gray-900 via-gray-900 to-gray-800 border border-emerald-500/30 rounded-2xl shadow-2xl relative overflow-hidden">
@@ -395,7 +373,9 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
               </svg>
             </div>
             <div>
-              <h4 className="text-lg font-bold text-white">Analysis Strategy</h4>
+              <h4 className="text-lg font-bold text-white">
+                {isMultiStep ? `Multi-Step Analysis (${plan.steps?.length || 0} Steps)` : 'Analysis Strategy'}
+              </h4>
               <p className="text-xs text-emerald-400">Review and confirm to execute</p>
             </div>
           </div>
@@ -407,53 +387,81 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
             </div>
           </div>
           
-          <div className="mb-5">
-            <div className="flex items-center gap-2 mb-3">
-              <div className="w-2 h-2 rounded-full bg-blue-400"></div>
-              <span className="text-xs text-gray-400 uppercase tracking-wider font-semibold">Execution Method</span>
-            </div>
-            
-            {plan.method === 'workflow' ? (
-              <div className="flex items-center gap-3 bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
-                <div className="w-12 h-12 rounded-lg bg-blue-500/20 flex items-center justify-center flex-shrink-0">
-                  <svg className="w-6 h-6 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                  </svg>
-                </div>
-                <div>
-                  <div className="text-xs text-blue-300 mb-1">Predefined Pipeline</div>
-                  <div className="text-white font-mono font-semibold">{plan.workflow_name}</div>
-                </div>
+          {isMultiStep ? (
+            <div className="mb-5">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="w-2 h-2 rounded-full bg-purple-400"></div>
+                <span className="text-xs text-gray-400 uppercase tracking-wider font-semibold">Execution Steps</span>
               </div>
-            ) : (
-              <div className="bg-purple-500/10 border border-purple-500/30 rounded-xl overflow-hidden">
-                <div className="flex items-center gap-3 p-4 border-b border-purple-500/20">
-                  <div className="w-10 h-10 rounded-lg bg-purple-500/20 flex items-center justify-center flex-shrink-0">
-                    <svg className="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+              
+              <div className="space-y-3">
+                {plan.steps?.map((step: any, idx: number) => (
+                  <div key={idx} className="bg-purple-500/10 border border-purple-500/30 rounded-xl p-4">
+                    <div className="flex items-center gap-3 mb-2">
+                      <div className="w-8 h-8 rounded-full bg-purple-500/30 flex items-center justify-center flex-shrink-0">
+                        <span className="text-purple-300 font-semibold text-sm">{step.step || idx + 1}</span>
+                      </div>
+                      <div>
+                        <div className="text-white font-medium">{step.action}</div>
+                        <div className="text-xs text-gray-400">Expected: {step.expected_output}</div>
+                      </div>
+                    </div>
+                    <pre className="bg-[#0d1117] p-3 text-xs text-green-400 font-mono overflow-x-auto max-h-32 overflow-y-auto rounded-lg">
+                      <code>{step.code}</code>
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="mb-5">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="w-2 h-2 rounded-full bg-blue-400"></div>
+                <span className="text-xs text-gray-400 uppercase tracking-wider font-semibold">Execution Method</span>
+              </div>
+              
+              {plan.method === 'workflow' ? (
+                <div className="flex items-center gap-3 bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
+                  <div className="w-12 h-12 rounded-lg bg-blue-500/20 flex items-center justify-center flex-shrink-0">
+                    <svg className="w-6 h-6 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
                     </svg>
                   </div>
                   <div>
-                    <div className="text-xs text-purple-300">Custom Python Code</div>
-                    <div className="text-white text-sm">Sandbox Environment</div>
+                    <div className="text-xs text-blue-300 mb-1">Predefined Pipeline</div>
+                    <div className="text-white font-mono font-semibold">{plan.workflow_name}</div>
                   </div>
                 </div>
-                <div className="relative">
-                  <div className="absolute top-2 left-0 right-0 flex items-center justify-between px-4 z-10">
-                    <span className="text-[10px] text-gray-500 font-mono">python</span>
-                    <div className="flex gap-1">
-                      <div className="w-2 h-2 rounded-full bg-red-500/50"></div>
-                      <div className="w-2 h-2 rounded-full bg-yellow-500/50"></div>
-                      <div className="w-2 h-2 rounded-full bg-green-500/50"></div>
+              ) : (
+                <div className="bg-purple-500/10 border border-purple-500/30 rounded-xl overflow-hidden">
+                  <div className="flex items-center gap-3 p-4 border-b border-purple-500/20">
+                    <div className="w-10 h-10 rounded-lg bg-purple-500/20 flex items-center justify-center flex-shrink-0">
+                      <svg className="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+                      </svg>
+                    </div>
+                    <div>
+                      <div className="text-xs text-purple-300">Custom Python Code</div>
+                      <div className="text-white text-sm">Sandbox Environment</div>
                     </div>
                   </div>
-                  <pre className="bg-[#0d1117] p-4 pt-8 text-xs text-green-400 font-mono overflow-x-auto max-h-64 overflow-y-auto leading-relaxed">
-                    <code>{plan.custom_code}</code>
-                  </pre>
+                  <div className="relative">
+                    <div className="absolute top-2 left-0 right-0 flex items-center justify-between px-4 z-10">
+                      <span className="text-[10px] text-gray-500 font-mono">python</span>
+                      <div className="flex gap-1">
+                        <div className="w-2 h-2 rounded-full bg-red-500/50"></div>
+                        <div className="w-2 h-2 rounded-full bg-yellow-500/50"></div>
+                        <div className="w-2 h-2 rounded-full bg-green-500/50"></div>
+                      </div>
+                    </div>
+                    <pre className="bg-[#0d1117] p-4 pt-8 text-xs text-green-400 font-mono overflow-x-auto max-h-64 overflow-y-auto leading-relaxed">
+                      <code>{plan.custom_code}</code>
+                    </pre>
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
 
           <div className="flex items-center gap-3">
             <button 
@@ -464,7 +472,7 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              Execute Analysis
+              {isMultiStep ? 'Execute Task Chain' : 'Execute Analysis'}
             </button>
           </div>
         </div>
