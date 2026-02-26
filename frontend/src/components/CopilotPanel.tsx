@@ -1,7 +1,8 @@
 'use client';
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import toast from 'react-hot-toast';
+import { useCopilotStore, ChatMessage as StoreChatMessage } from '@/stores/copilotStore';
 
 interface CopilotPanelProps {
   projectId: string;
@@ -20,6 +21,7 @@ interface ChatMessage {
   content: string;
   plan_data?: string | null;
   attachments?: string | null;
+  created_at?: string;
 }
 
 interface FullscreenPreview {
@@ -29,19 +31,30 @@ interface FullscreenPreview {
 }
 
 export default function CopilotPanel({ projectId }: CopilotPanelProps) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
   const [streamingPlan, setStreamingPlan] = useState<string | null>(null);
   
-  const [sessions, setSessions] = useState<string[]>(['default']);
-  const [currentSession, setCurrentSession] = useState('default');
-  
   const [fullscreenPreview, setFullscreenPreview] = useState<FullscreenPreview | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const prevMsgCountRef = useRef(0);
+  const isInitialLoadRef = useRef(true);
+  
+  const store = useCopilotStore();
+  
+  const currentSession = store.getCurrentSession(projectId) || 'default';
+  const messages = store.getMessages(projectId, currentSession);
+  const sessions = store.getSessions(projectId);
+  const hasMore = store.getHasMore(projectId, currentSession);
+  const isLoadingMore = store.getIsLoadingMore(projectId, currentSession);
+  const pendingTaskCount = store.getPendingTaskCount(projectId);
+
+  const setCurrentSession = useCallback((sessionId: string) => {
+    store.setCurrentSession(projectId, sessionId);
+  }, [projectId]);
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -51,47 +64,133 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
       });
       if (res.ok) {
         const data = await res.json();
-        setSessions(data.sessions);
+        store.setSessions(projectId, data.sessions);
       }
     } catch (e) { console.error(e); }
-  }, [projectId]);
+  }, [projectId, store]);
 
-  const fetchHistory = useCallback(async () => {
+  const fetchRecentMessages = useCallback(async () => {
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/history?session_id=${currentSession}`, {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/history?session_id=${currentSession}&limit=20`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
         const data = await res.json();
-        setMessages(data);
+        store.setMessages(projectId, currentSession, data.messages);
+        store.setHasMore(projectId, currentSession, data.has_more);
+        store.setOldestTimestamp(projectId, currentSession, data.oldest_created_at);
       }
     } catch (e) { console.error(e); }
-  }, [projectId, currentSession]);
+  }, [projectId, currentSession, store]);
+
+  const fetchOlderMessages = useCallback(async () => {
+    if (isLoadingMore || !hasMore) return;
+    
+    const oldestTs = store.getOldestTimestamp(projectId, currentSession);
+    if (!oldestTs) return;
+    
+    store.setIsLoadingMore(projectId, currentSession, true);
+    
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/history` +
+        `?session_id=${currentSession}&limit=20&before=${encodeURIComponent(oldestTs)}`,
+        { headers: { 'Authorization': `Bearer ${token}` } }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        if (data.messages.length > 0) {
+          store.prependMessages(projectId, currentSession, data.messages);
+        }
+        store.setHasMore(projectId, currentSession, data.has_more);
+        store.setOldestTimestamp(projectId, currentSession, data.oldest_created_at);
+      }
+    } catch (e) { 
+      console.error(e); 
+    } finally {
+      store.setIsLoadingMore(projectId, currentSession, false);
+    }
+  }, [projectId, currentSession, hasMore, isLoadingMore, store]);
+
+  const checkPendingTasks = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/has-pending-tasks`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        store.setPendingTaskCount(projectId, data.count);
+        return data.has_pending;
+      }
+    } catch (e) { console.error(e); }
+    return false;
+  }, [projectId, store]);
 
   useEffect(() => {
+    if (messages.length === 0) {
+      fetchRecentMessages();
+    }
     fetchSessions();
-    fetchHistory();
-  }, [fetchSessions, fetchHistory]);
+  }, [projectId]);
 
   useEffect(() => {
-    const interval = setInterval(fetchHistory, 5000);
-    return () => clearInterval(interval);
-  }, [fetchHistory]);
+    let interval: NodeJS.Timeout;
+    
+    const startPolling = async () => {
+      const hasPending = await checkPendingTasks();
+      if (hasPending) {
+        fetchRecentMessages();
+        interval = setInterval(async () => {
+          const stillPending = await checkPendingTasks();
+          if (stillPending) {
+            fetchRecentMessages();
+          } else {
+            clearInterval(interval);
+          }
+        }, 5000);
+      }
+    };
+    
+    startPolling();
+    
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [projectId, currentSession, checkPendingTasks, fetchRecentMessages]);
 
   useEffect(() => {
     if (messages.length > prevMsgCountRef.current) {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-        prevMsgCountRef.current = messages.length;
+      messagesEndRef.current?.scrollIntoView({ behavior: isInitialLoadRef.current ? 'auto' : 'smooth' });
+      prevMsgCountRef.current = messages.length;
+      isInitialLoadRef.current = false;
     }
-  }, [messages]);
+  }, [messages.length]);
+
+  const handleScroll = useCallback(async (e: React.UIEvent<HTMLDivElement>) => {
+    const container = e.currentTarget;
+    const isAtTop = container.scrollTop < 100;
+    
+    if (isAtTop && hasMore && !isLoadingMore) {
+      const prevScrollHeight = container.scrollHeight;
+      await fetchOlderMessages();
+      requestAnimationFrame(() => {
+        const newScrollHeight = container.scrollHeight;
+        container.scrollTop = newScrollHeight - prevScrollHeight + container.scrollTop;
+      });
+    }
+  }, [hasMore, isLoadingMore, fetchOlderMessages]);
 
   const handleNewSession = () => {
       const newId = `chat-${Date.now()}`;
-      setSessions(prev => [newId, ...prev]);
+      const newSessions = [newId, ...sessions];
+      store.setSessions(projectId, newSessions);
       setCurrentSession(newId);
-      setMessages([]);
+      store.setMessages(projectId, newId, []);
       prevMsgCountRef.current = 0;
+      isInitialLoadRef.current = true;
   };
 
   const handleSendStream = async (e: React.FormEvent) => {
@@ -100,7 +199,7 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
 
     const userMsg = input;
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+    store.appendMessage(projectId, currentSession, { role: 'user', content: userMsg });
     setIsLoading(true);
     setStreamingContent('');
     setStreamingPlan(null);
@@ -159,21 +258,21 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
                   break;
                   
                 case 'done':
-                  setMessages(prev => [...prev, { 
+                  store.appendMessage(projectId, currentSession, { 
                     role: 'assistant', 
                     content: accumulatedContent || 'I have created an analysis plan for you.',
                     plan_data: accumulatedPlan
-                  }]);
+                  });
                   setStreamingContent('');
                   setStreamingPlan(null);
                   break;
                   
                 case 'error':
                   toast.error(data.message);
-                  setMessages(prev => [...prev, { 
+                  store.appendMessage(projectId, currentSession, { 
                     role: 'assistant', 
                     content: `❌ **Error**: ${data.message}` 
-                  }]);
+                  });
                   setStreamingContent('');
                   setStreamingPlan(null);
                   break;
@@ -186,10 +285,10 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
       }
     } catch (error) {
       console.error('Stream error:', error);
-      setMessages(prev => [...prev, { 
+      store.appendMessage(projectId, currentSession, { 
         role: 'assistant', 
         content: "❌ **Error**: Connection failed. Please try again." 
-      }]);
+      });
       setStreamingContent('');
       setStreamingPlan(null);
     } finally {
@@ -221,7 +320,7 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
       }
       
       toast.success(planType === 'multi' ? 'Task chain submitted successfully!' : 'Task submitted successfully!', { id: toastId });
-      await fetchHistory(); 
+      await fetchRecentMessages(); 
     } catch (e: any) {
       toast.error(e.message, { id: toastId, duration: 6000 });
     }
@@ -578,7 +677,11 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
             <select 
                 className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-1.5 outline-none focus:border-blue-500"
                 value={currentSession}
-                onChange={(e) => { setCurrentSession(e.target.value); prevMsgCountRef.current=0; }}
+                onChange={(e) => { 
+                  setCurrentSession(e.target.value); 
+                  prevMsgCountRef.current=0; 
+                  isInitialLoadRef.current = true;
+                }}
             >
                 {sessions.map(s => <option key={s} value={s}>{s === 'default' ? 'Main Session' : `Chat (${s.slice(-6)})`}</option>)}
             </select>
@@ -588,7 +691,21 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
+      <div ref={messagesContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
+        {hasMore && (
+          <div className="text-center py-2">
+            {isLoadingMore ? (
+              <span className="text-gray-500 text-sm">⏳ Loading older messages...</span>
+            ) : (
+              <button 
+                onClick={fetchOlderMessages}
+                className="text-blue-400 text-sm hover:underline"
+              >
+                ↑ Load older messages
+              </button>
+            )}
+          </div>
+        )}
         {messages.length === 0 && !streamingContent ? (
           <div className="h-full flex flex-col items-center justify-center text-center opacity-50">
             <span className="text-5xl mb-4">🧬</span>

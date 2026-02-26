@@ -62,7 +62,6 @@ class SandboxService:
         if restore_context:
             context_path = os.path.join(container_project_dir, CONTEXT_FILE)
             if os.path.exists(context_path):
-                import shutil
                 shutil.copy(context_path, os.path.join(container_workspace_dir, CONTEXT_FILE))
                 print(f"📥 [Sandbox] Restored context from previous run", flush=True)
         

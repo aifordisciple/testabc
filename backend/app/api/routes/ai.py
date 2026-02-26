@@ -107,6 +107,18 @@ class ExecutePlanRequest(BaseModel):
     plan_data: dict
     session_id: str = "default"
 
+@router.get("/projects/{project_id}/chat/has-pending-tasks")
+def check_pending_tasks(project_id: uuid.UUID, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
+    """检查是否有待处理的任务，用于智能轮询"""
+    from app.models.user import Analysis
+    pending = session.exec(
+        select(Analysis).where(
+            Analysis.project_id == project_id,
+            Analysis.status.in_(["pending", "running"])
+        )
+    ).all()
+    return {"has_pending": len(pending) > 0, "count": len(pending)}
+
 @router.get("/projects/{project_id}/chat/sessions")
 def get_chat_sessions(project_id: uuid.UUID, session: Session = Depends(get_session)):
     records = session.exec(select(CopilotMessage.session_id).where(CopilotMessage.project_id == project_id).distinct()).all()
@@ -115,11 +127,42 @@ def get_chat_sessions(project_id: uuid.UUID, session: Session = Depends(get_sess
     return {"sessions": sessions}
 
 @router.get("/projects/{project_id}/chat/history")
-def get_chat_history(project_id: uuid.UUID, session_id: str = "default", session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
+def get_chat_history(
+    project_id: uuid.UUID, 
+    session_id: str = "default",
+    limit: int = 20,
+    before: Optional[str] = None,
+    session: Session = Depends(get_session), 
+    current_user: User = Depends(get_current_user)
+):
+    from datetime import datetime
     project = session.get(Project, project_id)
     if not project or project.owner_id != current_user.id: raise HTTPException(status_code=403, detail="Permission denied")
-    records = session.exec(select(CopilotMessage).where(CopilotMessage.project_id == project_id).where(CopilotMessage.session_id == session_id).order_by(CopilotMessage.created_at.asc())).all()
-    return [{"role": r.role, "content": r.content, "plan_data": r.plan_data, "attachments": r.attachments} for r in records]
+    
+    query = select(CopilotMessage).where(
+        CopilotMessage.project_id == project_id,
+        CopilotMessage.session_id == session_id
+    )
+    
+    if before:
+        try:
+            before_dt = datetime.fromisoformat(before.replace('Z', '+00:00'))
+            query = query.where(CopilotMessage.created_at < before_dt)
+        except:
+            pass
+    
+    query = query.order_by(CopilotMessage.created_at.desc()).limit(limit)
+    records = session.exec(query).all()
+    
+    has_more = len(records) == limit
+    oldest_ts = records[-1].created_at.isoformat() if records else None
+    
+    messages_list = [
+        {"role": r.role, "content": r.content, "plan_data": r.plan_data, "attachments": r.attachments, "created_at": r.created_at.isoformat()}
+        for r in reversed(records)
+    ]
+    
+    return {"messages": messages_list, "has_more": has_more, "oldest_created_at": oldest_ts}
 
 @router.post("/projects/{project_id}/chat")
 def chat_with_copilot(project_id: uuid.UUID, payload: ChatRequest, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
