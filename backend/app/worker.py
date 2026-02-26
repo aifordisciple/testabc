@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import subprocess
+import base64
 from celery import Celery
 from celery.schedules import crontab
 from sqlmodel import Session
@@ -12,7 +13,8 @@ from app.services.workflow_service import workflow_service
 from app.services.geo_service import geo_service
 from app.services.knowledge_service import knowledge_service
 from app.services.sandbox import sandbox_service
-from app.models.user import Analysis, CopilotMessage
+# 👇 引入 File, Project, ProjectFileLink 用于持久化
+from app.models.user import Analysis, CopilotMessage, Project, File, ProjectFileLink
 
 celery_app = Celery(
     "worker",
@@ -36,9 +38,6 @@ celery_app.conf.beat_schedule = {
     }
 }
 
-# ==========================================
-# 任务 1：原有标准流程执行 (UI 发起的普通任务)
-# ==========================================
 @celery_app.task(name="run_workflow_task", acks_late=True)
 def run_workflow_task(analysis_id: str):
     print(f"🚀 [Celery] Starting task for Analysis ID: {analysis_id}")
@@ -51,12 +50,9 @@ def run_workflow_task(analysis_id: str):
         print(f"❌ [Celery] Task failed: {str(e)}")
         raise e
 
-# ==========================================
-# 任务 2：GEO 定时同步任务
-# ==========================================
 @celery_app.task(name="sync_recent_geo_datasets")
 def sync_recent_geo_datasets(batch_size=15):
-    print(f"🔄 [Cron Task] Starting GEO dataset synchronization (Batch size: {batch_size})...")
+    print(f"🔄 [Cron Task] Starting GEO dataset synchronization...")
     datasets = geo_service.fetch_recent_datasets(retmax=batch_size)
     if not datasets: return 0
         
@@ -73,26 +69,14 @@ def sync_recent_geo_datasets(batch_size=15):
                 print(f"❌ [Cron Task] Error ingesting {ds['accession']}: {e}")
     return success_count
 
-# ==========================================
-# 🌟 任务 3：AI 调用的统一分析任务 (核心枢纽)
-# ==========================================
 @celery_app.task(name="run_ai_workflow_task")
 def run_ai_workflow_task(analysis_id: str, session_id: str = "default"):
-    """
-    此方法完美包裹了原有的 workflow_service.run_pipeline，
-    使其不仅能够处理 Nextflow，更能完美执行您库里的 TOOL (R/Perl脚本)，
-    最后将结果回传给聊天框。
-    """
     print(f"🤖 [AI Celery] Starting unified workflow task {analysis_id}")
-    
     try:
         with Session(engine) as session:
             analysis_uuid = uuid.UUID(analysis_id)
-            
-            # 👇 核心：完全复用您写的完美代码！
             workflow_service.run_pipeline(session, analysis_uuid)
             
-            # 执行完毕，刷新状态，判断成败并推送给前端聊天框
             session.refresh(session.get(Analysis, analysis_uuid))
             analysis = session.get(Analysis, analysis_uuid)
             success = (analysis.status == "completed")
@@ -109,13 +93,9 @@ def run_ai_workflow_task(analysis_id: str, session_id: str = "default"):
             msg = CopilotMessage(project_id=project_id, session_id=session_id, role="assistant", content=md_msg)
             session.add(msg)
             session.commit()
-            
     except Exception as e:
         print(f"❌ [AI Celery] System error: {e}")
 
-# ==========================================
-# 🌟 任务 4：AI 调用的自定义沙箱任务 (代码生成与画图)
-# ==========================================
 @celery_app.task(name="run_sandbox_task")
 def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, session_id: str = "default"):
     print(f"🚀 [Sandbox Task] Starting custom analysis {analysis_id}")
@@ -146,7 +126,6 @@ DATA_DIR = '/data'
 WORK_DIR = '/workspace'
 os.chdir(WORK_DIR)
 """
-    # 这里调用了您完美的 execute_python！
     res = sandbox_service.execute_python(project_id, setup_code + "\n" + custom_code)
 
     with open(log_file, "a", encoding="utf-8") as f:
@@ -154,26 +133,67 @@ os.chdir(WORK_DIR)
         if res['stderr']: f.write("STDERR:\n" + res['stderr'] + "\n")
         f.write("\n\n🏁 Execution Finished.\n")
 
-    # 任务结束，更新状态并向前端回传聊天记录及生成的文件列表
+    # 👇 核心：不仅回传结果，还将生成的图表直接写入数据库，让其在 Files 页面永久可见
     with Session(engine) as db:
         analysis = db.get(Analysis, uuid.UUID(analysis_id))
         if analysis:
             analysis.status = "completed" if res['success'] else "failed"
         
+        project = db.get(Project, uuid.UUID(project_id))
         status_icon = "✅" if res['success'] else "❌"
         md_msg = f"### {status_icon} Sandbox Analysis Finished (ID: `{analysis_id[:8]}`)\n\n"
         
-        # 将生成的图片和文件列入聊天框
-        if res['files']:
+        if res['files'] and project:
             md_msg += "**Generated Results:**\n\n"
+            
+            # 找到当前项目的物理上传根目录
+            upload_root = os.getenv("UPLOAD_ROOT", "/data/uploads")
+            save_dir = os.path.join(upload_root, str(project_id))
+            os.makedirs(save_dir, exist_ok=True)
+            
             for file_info in res['files']:
                 if isinstance(file_info, dict):
-                    if file_info.get("type") == "image":
-                        md_msg += f"![{file_info['name']}]({file_info['data']})\n\n"
-                    else:
-                        md_msg += f"- 📄 `{file_info['name']}` (Saved in Files tab)\n"
+                    fname = file_info.get("name", "output.txt")
+                    fpath = os.path.join(save_dir, fname)
+                    
+                    try:
+                        # 物理写入文件
+                        if file_info.get("type") == "image":
+                            # 解出纯 base64 数据并写入本地文件
+                            b64_str = file_info['data'].split(",")[1]
+                            with open(fpath, "wb") as f:
+                                f.write(base64.b64decode(b64_str))
+                            # 在对话框渲染这张图片
+                            md_msg += f"![{fname}]({file_info['data']})\n\n"
+                        else:
+                            with open(fpath, "w", encoding="utf-8") as f:
+                                f.write(file_info.get("content", ""))
+                            md_msg += f"- 📄 `{fname}`\n"
+                            
+                        # 记录到数据库 File 表中
+                        fsize = os.path.getsize(fpath)
+                        content_type = "image/" + fname.split('.')[-1] if file_info.get("type") == "image" else "text/plain"
+                        
+                        db_file = File(
+                            filename=fname, size=fsize,
+                            content_type=content_type,
+                            s3_key=f"{project_id}/{fname}",
+                            uploader_id=project.owner_id
+                        )
+                        db.add(db_file)
+                        db.commit()
+                        db.refresh(db_file)
+                        
+                        # 关联到项目
+                        db.add(ProjectFileLink(project_id=project.id, file_id=db_file.id))
+                        db.commit()
+                        
+                    except Exception as e:
+                        print(f"❌ Failed to save sandbox file {fname}: {e}")
                 else:
                     md_msg += f"- 📄 `{file_info}`\n"
+            
+            md_msg += "\n*(Files are securely stored in your **Files** tab)*\n\n"
         
         if res['stdout']:
             out = res['stdout'][:1000] + ('...' if len(res['stdout'])>1000 else '')

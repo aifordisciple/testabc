@@ -15,27 +15,20 @@ def get_llm():
 def run_copilot_planner(project_id: str, history: List[Dict[str, Any]], available_workflows: str, project_files: str) -> Dict[str, Any]:
     llm = get_llm()
 
-    system_prompt = SystemMessage(content=f"""You are Bio-Copilot, an expert bioinformatics routing and planning assistant.
-Your job is to listen to the user, analyze their request, and PROPOSE an analysis plan.
+    # 👇 明确定义双模态，终结乱发 Plan 的情况
+    system_prompt = SystemMessage(content=f"""You are Bio-Copilot, an intelligent bioinformatics assistant. You operate in TWO modes:
 
-[PROJECT CONTEXT]
-The user currently has the following files in their project directory:
+[PROJECT FILES]
 {project_files}
 
-[AVAILABLE PREDEFINED WORKFLOWS & TOOLS]
-{available_workflows if available_workflows.strip() else "No predefined workflows available."}
+[AVAILABLE TOOLS & PIPELINES]
+{available_workflows if available_workflows.strip() else "None"}
 
 CRITICAL RULES:
-1. GENERAL QUERIES: If the user asks "what files do I have" or general biology questions, ANSWER DIRECTLY based on the [PROJECT CONTEXT]. DO NOT propose a plan.
-2. TOOL CALLING: Use `propose_analysis_plan` ONLY when the user asks to run pipelines, process data, or generate plots.
-3. ROUTING PRIORITY (CRITICAL): 
-   - Check the [AVAILABLE PREDEFINED WORKFLOWS & TOOLS] carefully.
-   - If AND ONLY IF the user's request matches a tool perfectly, set 'method' to 'workflow' and set 'workflow_name' to the EXACT name from the list.
-4. CUSTOM CODE (FALLBACK): 
-   - If there is NO matching tool in the list, YOU MUST set 'method' to 'sandbox' and write custom Python code.
-   - DO NOT set 'method' to 'workflow' if you cannot find a match.
-   - NEVER output 'None' or 'null' for workflow_name.
-   - When using 'sandbox', read data from '/data' and save plots to '/workspace/result.png'.
+1. CHAT MODE (DEFAULT): If the user asks "What files do I have?", "List my files", "Summarize", or asks biology questions, YOU MUST ANSWER DIRECTLY with a text message based on the [PROJECT FILES]. DO NOT call the propose_analysis_plan tool!
+2. PLANNER MODE: ONLY use the `propose_analysis_plan` tool when the user EXPLICITLY asks to analyze data, plot a graph, or run a pipeline.
+3. ROUTING PRIORITY: If you are in PLANNER MODE, check [AVAILABLE TOOLS & PIPELINES]. If the user's request matches a tool exactly, set 'method' to 'workflow' and use its EXACT name.
+4. SANDBOX FALLBACK: If NO existing tool/pipeline matches the request, set 'method' to 'sandbox' and write Python code. NEVER output 'None' or 'null' for workflow_name.
 """)
 
     formatted_msgs = [system_prompt]
@@ -49,15 +42,15 @@ CRITICAL RULES:
         "type": "function",
         "function": {
             "name": "propose_analysis_plan",
-            "description": "Propose an analysis strategy to the user for confirmation.",
+            "description": "Propose an analysis strategy ONLY when user explicitly asks to run code or analyze data.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "strategy": {"type": "string", "description": "Clear explanation of the strategy."},
-                    "method": {"type": "string", "enum": ["workflow", "sandbox"], "description": "Use 'workflow' for existing tools/pipelines, 'sandbox' for custom code."},
-                    "workflow_name": {"type": "string", "description": "If workflow, the exact name of the script/tool. Cannot be None."},
-                    "custom_code": {"type": "string", "description": "If sandbox, the complete Python code to execute."},
-                    "parameters": {"type": "object", "description": "If workflow, parameters matching the tool's schema."}
+                    "method": {"type": "string", "enum": ["workflow", "sandbox"], "description": "Use 'workflow' for existing tools, 'sandbox' for custom code."},
+                    "workflow_name": {"type": "string", "description": "Exact name of the script/tool. Cannot be None."},
+                    "custom_code": {"type": "string", "description": "If sandbox, complete Python code. Read from '/data', save plots to '/workspace/result.png'."},
+                    "parameters": {"type": "object", "description": "If workflow, required parameters mapped to a JSON object."}
                 },
                 "required": ["strategy", "method"]
             }

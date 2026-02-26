@@ -113,7 +113,6 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
         body: JSON.stringify({ plan_data: plan, session_id: currentSession })
       });
       
-      // 👇 核心修复：把后端返回的具体报错内容(detail)展示在提示框上
       if (!res.ok) {
           const errData = await res.json();
           throw new Error(errData.detail || 'Failed to execute plan');
@@ -122,7 +121,6 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
       toast.success('Task submitted successfully!', { id: toastId });
       await fetchHistory(); 
     } catch (e: any) {
-      // 显示具体的错误，而不是泛泛的报错
       toast.error(e.message, { id: toastId, duration: 6000 });
     }
   };
@@ -140,7 +138,7 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
          <div className="bg-gray-950 rounded border border-gray-800 p-3 mb-5">
             <div className="text-xs text-gray-500 uppercase font-bold mb-1 tracking-wider">Routing Details</div>
             {plan.method === 'workflow' ? (
-                <div><span className="text-blue-400 font-medium">Standard Workflow ➔ </span><span className="text-white">{plan.workflow_name}</span></div>
+                <div><span className="text-blue-400 font-medium">Standard Tool/Pipeline ➔ </span><span className="text-white">{plan.workflow_name}</span></div>
             ) : (
                 <div>
                    <span className="text-purple-400 font-medium">Custom Sandbox Code ➔ </span><span className="text-white">Python Env</span>
@@ -198,7 +196,19 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
                 msg.role === 'user' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'bg-gray-800 text-gray-200 border border-gray-700 shadow-md'
               }`}>
                 <div className={`prose prose-sm max-w-none ${msg.role === 'user' ? 'prose-invert' : 'prose-invert prose-blue'}`}>
-                  <ReactMarkdown>{msg.content}</ReactMarkdown>
+                  {/* 👇 核心修复：允许 ReactMarkdown 渲染 data: 格式的 Base64 图片，并加上图框样式 */}
+                  <ReactMarkdown
+                    urlTransform={(value: string) => value}
+                    components={{
+                      img: ({node, ...props}) => (
+                        <div className="my-4 bg-[#0d1117] p-3 rounded-xl border border-gray-700/50 inline-block shadow-inner">
+                          <img {...props} className="max-w-full h-auto rounded-lg" alt="AI Generated Graphic" />
+                        </div>
+                      )
+                    }}
+                  >
+                    {msg.content}
+                  </ReactMarkdown>
                 </div>
                 {msg.plan_data && renderPlanCard(msg.plan_data)}
               </div>
