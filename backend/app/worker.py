@@ -13,7 +13,6 @@ from app.services.workflow_service import workflow_service
 from app.services.geo_service import geo_service
 from app.services.knowledge_service import knowledge_service
 from app.services.sandbox import sandbox_service
-# 👇 引入 File, Project, ProjectFileLink 用于持久化
 from app.models.user import Analysis, CopilotMessage, Project, File, ProjectFileLink
 
 celery_app = Celery(
@@ -133,7 +132,6 @@ os.chdir(WORK_DIR)
         if res['stderr']: f.write("STDERR:\n" + res['stderr'] + "\n")
         f.write("\n\n🏁 Execution Finished.\n")
 
-    # 👇 核心：不仅回传结果，还将生成的图表直接写入数据库，让其在 Files 页面永久可见
     with Session(engine) as db:
         analysis = db.get(Analysis, uuid.UUID(analysis_id))
         if analysis:
@@ -143,10 +141,11 @@ os.chdir(WORK_DIR)
         status_icon = "✅" if res['success'] else "❌"
         md_msg = f"### {status_icon} Sandbox Analysis Finished (ID: `{analysis_id[:8]}`)\n\n"
         
+        attachments = []
+        
         if res['files'] and project:
             md_msg += "**Generated Results:**\n\n"
             
-            # 找到当前项目的物理上传根目录
             upload_root = os.getenv("UPLOAD_ROOT", "/data/uploads")
             save_dir = os.path.join(upload_root, str(project_id))
             os.makedirs(save_dir, exist_ok=True)
@@ -157,20 +156,33 @@ os.chdir(WORK_DIR)
                     fpath = os.path.join(save_dir, fname)
                     
                     try:
-                        # 物理写入文件
                         if file_info.get("type") == "image":
-                            # 解出纯 base64 数据并写入本地文件
                             b64_str = file_info['data'].split(",")[1]
                             with open(fpath, "wb") as f:
                                 f.write(base64.b64decode(b64_str))
-                            # 在对话框渲染这张图片
-                            md_msg += f"![{fname}]({file_info['data']})\n\n"
+                            
+                            attachments.append({
+                                "type": "image",
+                                "name": fname,
+                                "data": file_info['data']
+                            })
                         else:
                             with open(fpath, "w", encoding="utf-8") as f:
                                 f.write(file_info.get("content", ""))
-                            md_msg += f"- 📄 `{fname}`\n"
                             
-                        # 记录到数据库 File 表中
+                            content = file_info.get("content", "")
+                            preview_lines = content.split('\n')[:20]
+                            
+                            if fname.endswith(('.csv', '.tsv')):
+                                attachments.append({
+                                    "type": "table",
+                                    "name": fname,
+                                    "preview": '\n'.join(preview_lines),
+                                    "full_available": True
+                                })
+                            else:
+                                md_msg += f"- 📄 `{fname}`\n"
+                            
                         fsize = os.path.getsize(fpath)
                         content_type = "image/" + fname.split('.')[-1] if file_info.get("type") == "image" else "text/plain"
                         
@@ -184,7 +196,6 @@ os.chdir(WORK_DIR)
                         db.commit()
                         db.refresh(db_file)
                         
-                        # 关联到项目
                         db.add(ProjectFileLink(project_id=project.id, file_id=db_file.id))
                         db.commit()
                         
@@ -203,6 +214,12 @@ os.chdir(WORK_DIR)
             err = res['stderr'][:1000] + ('...' if len(res['stderr'])>1000 else '')
             md_msg += f"\n**Error Detail:**\n```text\n{err}\n```\n"
 
-        msg = CopilotMessage(project_id=uuid.UUID(project_id), session_id=session_id, role="assistant", content=md_msg)
+        msg = CopilotMessage(
+            project_id=uuid.UUID(project_id), 
+            session_id=session_id, 
+            role="assistant", 
+            content=md_msg,
+            attachments=json.dumps(attachments) if attachments else None
+        )
         db.add(msg)
         db.commit()

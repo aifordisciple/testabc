@@ -221,4 +221,7 @@ class CopilotMessage(SQLModel, table=True):
     # 如果 AI 提出了一套分析方案，这里存储结构化的 JSON
     plan_data: Optional[str] = Field(default=None, description="AI 提出的分析方案 JSON")
     
+    # 内嵌可视化资源：图片、表格等
+    attachments: Optional[str] = Field(default=None, description="JSON array of attachment objects (images, tables, etc.)")
+    
     created_at: datetime = Field(default_factory=datetime.utcnow)

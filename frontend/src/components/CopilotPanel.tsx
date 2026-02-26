@@ -1,25 +1,44 @@
 'use client';
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
-import toast from 'react-hot-toast';
+import toast from 'hot-toast';
 
 interface CopilotPanelProps {
   projectId: string;
+}
+
+interface Attachment {
+  type: 'image' | 'table' | 'file';
+  name: string;
+  data?: string;
+  preview?: string;
+  full_available?: boolean;
 }
 
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   plan_data?: string | null;
+  attachments?: string | null;
+}
+
+interface FullscreenPreview {
+  type: 'image' | 'table';
+  data: string;
+  name: string;
 }
 
 export default function CopilotPanel({ projectId }: CopilotPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [streamingContent, setStreamingContent] = useState('');
+  const [streamingPlan, setStreamingPlan] = useState<string | null>(null);
   
   const [sessions, setSessions] = useState<string[]>(['default']);
   const [currentSession, setCurrentSession] = useState('default');
+  
+  const [fullscreenPreview, setFullscreenPreview] = useState<FullscreenPreview | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const prevMsgCountRef = useRef(0);
@@ -75,7 +94,7 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
       prevMsgCountRef.current = 0;
   };
 
-  const handleSend = async (e: React.FormEvent) => {
+  const handleSendStream = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
 
@@ -83,19 +102,96 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
     setInput('');
     setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
     setIsLoading(true);
+    setStreamingContent('');
+    setStreamingPlan(null);
 
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ message: userMsg, session_id: currentSession })
-      });
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/stream`,
+        {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json', 
+            'Authorization': `Bearer ${token}` 
+          },
+          body: JSON.stringify({ message: userMsg, session_id: currentSession })
+        }
+      );
 
-      if (!res.ok) throw new Error('API Error');
-      await fetchHistory(); 
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('No response body');
+      }
+
+      const decoder = new TextDecoder();
+      let accumulatedContent = '';
+      let accumulatedPlan: string | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const text = decoder.decode(value, { stream: true });
+        const lines = text.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              
+              switch (data.type) {
+                case 'start':
+                  break;
+                  
+                case 'token':
+                  accumulatedContent += data.content;
+                  setStreamingContent(accumulatedContent);
+                  break;
+                  
+                case 'plan':
+                  accumulatedPlan = data.plan_data;
+                  setStreamingPlan(accumulatedPlan);
+                  break;
+                  
+                case 'done':
+                  setMessages(prev => [...prev, { 
+                    role: 'assistant', 
+                    content: accumulatedContent || 'I have created an analysis plan for you.',
+                    plan_data: accumulatedPlan
+                  }]);
+                  setStreamingContent('');
+                  setStreamingPlan(null);
+                  break;
+                  
+                case 'error':
+                  toast.error(data.message);
+                  setMessages(prev => [...prev, { 
+                    role: 'assistant', 
+                    content: `❌ **Error**: ${data.message}` 
+                  }]);
+                  setStreamingContent('');
+                  setStreamingPlan(null);
+                  break;
+              }
+            } catch (parseError) {
+              console.error('Failed to parse SSE data:', parseError);
+            }
+          }
+        }
+      }
     } catch (error) {
-      setMessages(prev => [...prev, { role: 'assistant', content: "❌ **Error**: Connection failed." }]);
+      console.error('Stream error:', error);
+      setMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: "❌ **Error**: Connection failed. Please try again." 
+      }]);
+      setStreamingContent('');
+      setStreamingPlan(null);
     } finally {
       setIsLoading(false);
     }
@@ -123,6 +219,102 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
     } catch (e: any) {
       toast.error(e.message, { id: toastId, duration: 6000 });
     }
+  };
+
+  const downloadFile = (dataUrl: string, filename: string) => {
+    const link = document.createElement('a');
+    link.href = dataUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const renderAttachments = (attachmentsStr: string | null) => {
+    if (!attachmentsStr) return null;
+    
+    let attachments: Attachment[] = [];
+    try {
+      attachments = JSON.parse(attachmentsStr);
+    } catch {
+      return null;
+    }
+
+    if (!attachments || attachments.length === 0) return null;
+
+    return (
+      <div className="mt-4 space-y-4">
+        {attachments.map((att, idx) => {
+          if (att.type === 'image') {
+            return (
+              <div key={idx} className="bg-gray-900 rounded-xl p-4 border border-gray-700">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm text-gray-400 flex items-center gap-2">
+                    <span>📊</span> {att.name}
+                  </span>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => setFullscreenPreview({ type: 'image', data: att.data!, name: att.name })}
+                      className="text-blue-400 text-xs hover:underline flex items-center gap-1"
+                    >
+                      🔍 Fullscreen
+                    </button>
+                    <button 
+                      onClick={() => att.data && downloadFile(att.data, att.name)}
+                      className="text-blue-400 text-xs hover:underline flex items-center gap-1"
+                    >
+                      ⬇️ Download
+                    </button>
+                  </div>
+                </div>
+                <img 
+                  src={att.data} 
+                  alt={att.name} 
+                  className="max-w-full max-h-96 rounded-lg shadow-lg cursor-pointer hover:opacity-90 transition-opacity"
+                  onClick={() => setFullscreenPreview({ type: 'image', data: att.data!, name: att.name })}
+                />
+              </div>
+            );
+          }
+
+          if (att.type === 'table') {
+            const lines = (att.preview || '').split('\n').slice(0, 20);
+            return (
+              <div key={idx} className="bg-gray-900 rounded-xl p-4 border border-gray-700">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm text-gray-400 flex items-center gap-2">
+                    <span>📄</span> {att.name}
+                  </span>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => setFullscreenPreview({ type: 'table', data: att.preview || '', name: att.name })}
+                      className="text-blue-400 text-xs hover:underline flex items-center gap-1"
+                    >
+                      🔍 View All
+                    </button>
+                  </div>
+                </div>
+                <div className="overflow-x-auto max-h-48 text-xs text-gray-300 font-mono bg-gray-950 rounded p-2">
+                  <table className="w-full">
+                    <tbody>
+                      {lines.map((row, i) => (
+                        <tr key={i} className="border-b border-gray-800">
+                          {row.split(/[,\t]/).map((cell, j) => (
+                            <td key={j} className="px-2 py-1 whitespace-nowrap">{cell}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          }
+
+          return null;
+        })}
+      </div>
+    );
   };
 
   const renderPlanCard = (planDataStr: string) => {
@@ -159,6 +351,80 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
     );
   };
 
+  const renderFullscreenPreview = () => {
+    if (!fullscreenPreview) return null;
+
+    return (
+      <div 
+        className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4"
+        onClick={() => setFullscreenPreview(null)}
+      >
+        <div className="relative max-w-6xl max-h-full w-full" onClick={e => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-white font-medium">{fullscreenPreview.name}</h3>
+            <button 
+              onClick={() => setFullscreenPreview(null)}
+              className="text-gray-400 hover:text-white text-2xl"
+            >
+              ✕
+            </button>
+          </div>
+          
+          {fullscreenPreview.type === 'image' && (
+            <img 
+              src={fullscreenPreview.data} 
+              alt={fullscreenPreview.name}
+              className="max-w-full max-h-[85vh] mx-auto rounded-lg shadow-2xl"
+            />
+          )}
+          
+          {fullscreenPreview.type === 'table' && (
+            <div className="bg-gray-900 rounded-xl p-6 max-h-[85vh] overflow-auto">
+              <table className="w-full text-sm text-gray-300 font-mono">
+                <tbody>
+                  {fullscreenPreview.data.split('\n').map((row, i) => (
+                    <tr key={i} className="border-b border-gray-800">
+                      {row.split(/[,\t]/).map((cell, j) => (
+                        <td key={j} className="px-3 py-2 whitespace-nowrap">{cell}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderMessage = (msg: ChatMessage, idx: number) => {
+    return (
+      <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-2`}>
+        <div className={`max-w-[85%] rounded-2xl px-5 py-3 ${
+          msg.role === 'user' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'bg-gray-800 text-gray-200 border border-gray-700 shadow-md'
+        }`}>
+          <div className={`prose prose-sm max-w-none ${msg.role === 'user' ? 'prose-invert' : 'prose-invert prose-blue'}`}>
+            <ReactMarkdown
+              urlTransform={(value: string) => value}
+              components={{
+                img: ({node, ...props}) => (
+                  <div className="my-4 bg-[#0d1117] p-3 rounded-xl border border-gray-700/50 inline-block shadow-inner">
+                    <img {...props} className="max-w-full h-auto rounded-lg cursor-pointer hover:opacity-90" alt="AI Generated Graphic" />
+                  </div>
+                )
+              }}
+            >
+              {msg.content}
+            </ReactMarkdown>
+          </div>
+          {msg.plan_data && renderPlanCard(msg.plan_data)}
+          {msg.attachments && renderAttachments(msg.attachments)}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="flex flex-col h-full bg-[#0d1117]">
       <div className="p-4 border-b border-gray-800 bg-gray-900/50 flex justify-between items-center shadow-sm">
@@ -184,39 +450,29 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
-        {messages.length === 0 ? (
+        {messages.length === 0 && !streamingContent ? (
           <div className="h-full flex flex-col items-center justify-center text-center opacity-50">
             <span className="text-5xl mb-4">🧬</span>
             <p className="text-gray-400">Ask about your files, or request an analysis pipeline.</p>
           </div>
         ) : (
-          messages.map((msg, idx) => (
-            <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-2`}>
-              <div className={`max-w-[85%] rounded-2xl px-5 py-3 ${
-                msg.role === 'user' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'bg-gray-800 text-gray-200 border border-gray-700 shadow-md'
-              }`}>
-                <div className={`prose prose-sm max-w-none ${msg.role === 'user' ? 'prose-invert' : 'prose-invert prose-blue'}`}>
-                  {/* 👇 核心修复：允许 ReactMarkdown 渲染 data: 格式的 Base64 图片，并加上图框样式 */}
-                  <ReactMarkdown
-                    urlTransform={(value: string) => value}
-                    components={{
-                      img: ({node, ...props}) => (
-                        <div className="my-4 bg-[#0d1117] p-3 rounded-xl border border-gray-700/50 inline-block shadow-inner">
-                          <img {...props} className="max-w-full h-auto rounded-lg" alt="AI Generated Graphic" />
-                        </div>
-                      )
-                    }}
-                  >
-                    {msg.content}
-                  </ReactMarkdown>
+          <>
+            {messages.map((msg, idx) => renderMessage(msg, idx))}
+            
+            {streamingContent && (
+              <div className="flex justify-start animate-in fade-in">
+                <div className="max-w-[85%] rounded-2xl px-5 py-3 bg-gray-800 text-gray-200 border border-gray-700 shadow-md">
+                  <div className="prose prose-sm max-w-none prose-invert prose-blue">
+                    <ReactMarkdown>{streamingContent}</ReactMarkdown>
+                  </div>
+                  {streamingPlan && renderPlanCard(streamingPlan)}
                 </div>
-                {msg.plan_data && renderPlanCard(msg.plan_data)}
               </div>
-            </div>
-          ))
+            )}
+          </>
         )}
         
-        {isLoading && (
+        {isLoading && !streamingContent && (
           <div className="flex justify-start">
             <div className="bg-gray-800 border border-gray-700 rounded-2xl px-5 py-4 flex items-center gap-3">
               <span className="relative flex h-3 w-3"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span><span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span></span>
@@ -228,11 +484,11 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
       </div>
 
       <div className="p-4 bg-gray-900 border-t border-gray-800">
-        <form onSubmit={handleSend} className="relative max-w-4xl mx-auto flex items-end bg-[#0f1218] border border-gray-700 rounded-xl overflow-hidden focus-within:border-blue-500 transition-all shadow-inner">
+        <form onSubmit={handleSendStream} className="relative max-w-4xl mx-auto flex items-end bg-[#0f1218] border border-gray-700 rounded-xl overflow-hidden focus-within:border-blue-500 transition-all shadow-inner">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendStream(e); } }}
             placeholder="E.g., What files do I have? OR Plot a PCA from data.csv..."
             className="w-full bg-transparent text-white px-4 py-4 max-h-32 outline-none resize-none placeholder-gray-500 text-sm"
             rows={1}
@@ -244,6 +500,8 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
           </div>
         </form>
       </div>
+
+      {renderFullscreenPreview()}
     </div>
   );
 }
