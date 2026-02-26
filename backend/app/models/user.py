@@ -225,3 +225,27 @@ class CopilotMessage(SQLModel, table=True):
     attachments: Optional[str] = Field(default=None, description="JSON array of attachment objects (images, tables, etc.)")
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+# =======================
+# 8. 任务链模型 (TaskChain) - 多步骤任务
+# =======================
+class TaskChain(SQLModel, table=True):
+    __tablename__ = "task_chain"
+    
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    project_id: uuid.UUID = Field(foreign_key="project.id", index=True)
+    session_id: str = Field(default="default", index=True)
+    
+    status: str = Field(default="pending", description="pending/running/completed/failed")
+    current_step: int = Field(default=0, description="当前执行到第几步")
+    total_steps: int = Field(default=1, description="总步数")
+    
+    strategy: Optional[str] = Field(default=None, description="总体策略说明")
+    steps_json: str = Field(default="[]", description="JSON array of steps")
+    context: Optional[str] = Field(default=None, description="执行上下文")
+    
+    retry_count: int = Field(default=0, description="当前步骤重试次数")
+    last_error: Optional[str] = Field(default=None, description="最后一次错误信息")
+    
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

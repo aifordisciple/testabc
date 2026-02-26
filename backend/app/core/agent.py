@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from typing import List, Dict, Any, AsyncGenerator
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -23,10 +24,12 @@ def _build_system_prompt(available_workflows: str, project_files: str) -> System
 
 CRITICAL RULES YOU MUST FOLLOW:
 1. KNOW YOUR FILES: You ALREADY know what files the user has because they are listed above in [YOUR CURRENT PROJECT FILES]. If the user asks "What files do I have" or "Find the sample file", DO NOT write code to scan directories. Just ANSWER DIRECTLY based on the list above.
-2. NEVER ASK THE USER TO RUN CODE: You are an autonomous agent. If data needs to be processed, analyzed, or plotted, YOU MUST use the `propose_analysis_plan` tool (with method 'sandbox'). NEVER output Python code in plain text and ask the user to "please run this code". You do the running!
-3. ROUTING PRIORITY: When the user asks to analyze data, check [AVAILABLE TOOLS & PIPELINES]. If a predefined tool fits perfectly, call `propose_analysis_plan` with method='workflow'.
-4. SANDBOX FALLBACK: If no tool fits, call `propose_analysis_plan` with method='sandbox' and write the Python code yourself.
+2. NEVER ASK THE USER TO RUN CODE: You are an autonomous agent. If data needs to be processed, analyzed, or plotted, YOU MUST use tools. NEVER output Python code in plain text and ask the user to "please run this code". You do the running!
+3. ROUTING PRIORITY: When the user asks to analyze data, check [AVAILABLE TOOLS & PIPELINES]. If a predefined tool fits perfectly, use it.
+4. SANDBOX FALLBACK: If no tool fits, write custom Python code.
 5. SANDBOX PATHS: Always read input files from the `/data` directory. Always save your output plots/results to the `/workspace` directory (e.g., `/workspace/result.png`).
+6. MULTI-STEP TASKS: For complex tasks requiring multiple steps (e.g., "clean data, analyze, and visualize"), use `propose_multi_step_plan` to break it into sequential steps.
+7. SIMPLE TASKS: For single-step tasks, use `propose_analysis_plan`.
 """)
 
 def _format_messages(system_prompt: SystemMessage, history: List[Dict[str, Any]]) -> List:
@@ -38,12 +41,12 @@ def _format_messages(system_prompt: SystemMessage, history: List[Dict[str, Any]]
             formatted_msgs.append(AIMessage(content=msg["content"]))
     return formatted_msgs
 
-def _get_propose_plan_tool():
+def _get_single_step_tool():
     return {
         "type": "function",
         "function": {
             "name": "propose_analysis_plan",
-            "description": "Propose an analysis strategy ONLY when user explicitly asks to run code or analyze data.",
+            "description": "Propose a SINGLE-STEP analysis strategy. Use this for simple tasks.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -58,29 +61,73 @@ def _get_propose_plan_tool():
         }
     }
 
+def _get_multi_step_tool():
+    return {
+        "type": "function",
+        "function": {
+            "name": "propose_multi_step_plan",
+            "description": "Propose a MULTI-STEP analysis chain. Use this for complex tasks that require sequential operations (e.g., data cleaning -> analysis -> visualization).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "strategy": {"type": "string", "description": "Overall strategy explanation."},
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "step": {"type": "integer", "description": "Step number (1, 2, 3...)"},
+                                "action": {"type": "string", "description": "Brief action name (e.g., 'Load Data', 'Clean Data', 'Analyze', 'Visualize')"},
+                                "code": {"type": "string", "description": "Complete Python code for this step. IMPORTANT: Each step should save its results to files in /workspace so the next step can read them."},
+                                "expected_output": {"type": "string", "description": "What this step will produce (e.g., 'cleaned_data.csv', 'analysis_results.json')"}
+                            },
+                            "required": ["step", "action", "code", "expected_output"]
+                        }
+                    }
+                },
+                "required": ["strategy", "steps"]
+            }
+        }
+    }
+
 def run_copilot_planner(project_id: str, history: List[Dict[str, Any]], available_workflows: str, project_files: str) -> Dict[str, Any]:
     llm = get_llm()
     system_prompt = _build_system_prompt(available_workflows, project_files)
     formatted_msgs = _format_messages(system_prompt, history)
-    propose_plan_tool = _get_propose_plan_tool()
-
-    llm_with_tools = llm.bind_tools([propose_plan_tool])
+    
+    single_step_tool = _get_single_step_tool()
+    multi_step_tool = _get_multi_step_tool()
+    
+    llm_with_tools = llm.bind_tools([single_step_tool, multi_step_tool])
     print(f"🧠 [Agent Planner] Thinking for project {project_id}...", flush=True)
     
     response = llm_with_tools.invoke(formatted_msgs)
 
     if response.tool_calls:
         tool_call = response.tool_calls[0]
-        if tool_call["name"] == "propose_analysis_plan":
+        tool_name = tool_call["name"]
+        
+        if tool_name == "propose_analysis_plan":
             plan = tool_call["args"]
             return {
                 "reply": "I have created an analysis plan for you. Please review and confirm it below.",
-                "plan_data": json.dumps(plan)
+                "plan_data": json.dumps({"type": "single", **plan}),
+                "plan_type": "single"
+            }
+        
+        elif tool_name == "propose_multi_step_plan":
+            plan = tool_call["args"]
+            total_steps = len(plan.get("steps", []))
+            return {
+                "reply": f"I have created a **multi-step analysis plan** with {total_steps} steps. Please review and confirm it below.",
+                "plan_data": json.dumps({"type": "multi", **plan}),
+                "plan_type": "multi"
             }
 
     return {
         "reply": response.content,
-        "plan_data": None
+        "plan_data": None,
+        "plan_type": None
     }
 
 async def run_copilot_planner_stream(
@@ -92,13 +139,16 @@ async def run_copilot_planner_stream(
     llm = get_llm()
     system_prompt = _build_system_prompt(available_workflows, project_files)
     formatted_msgs = _format_messages(system_prompt, history)
-    propose_plan_tool = _get_propose_plan_tool()
-
-    llm_with_tools = llm.bind_tools([propose_plan_tool])
+    
+    single_step_tool = _get_single_step_tool()
+    multi_step_tool = _get_multi_step_tool()
+    
+    llm_with_tools = llm.bind_tools([single_step_tool, multi_step_tool])
     print(f"🧠 [Agent Planner] Streaming for project {project_id}...", flush=True)
     
     full_content = ""
     plan_data = None
+    plan_type = None
     
     try:
         async for chunk in llm_with_tools.astream(formatted_msgs):
@@ -111,20 +161,41 @@ async def run_copilot_planner_stream(
             
             if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
                 tool_call = chunk.tool_calls[0]
-                if tool_call["name"] == "propose_analysis_plan":
-                    plan_data = tool_call["args"]
+                tool_name = tool_call["name"]
+                
+                if tool_name == "propose_analysis_plan":
+                    plan = tool_call["args"]
+                    plan_data = json.dumps({"type": "single", **plan})
+                    plan_type = "single"
                     yield {
                         "type": "plan",
-                        "plan_data": json.dumps(plan_data)
+                        "plan_data": plan_data,
+                        "plan_type": plan_type
+                    }
+                    
+                elif tool_name == "propose_multi_step_plan":
+                    plan = tool_call["args"]
+                    plan_data = json.dumps({"type": "multi", **plan})
+                    plan_type = "multi"
+                    total_steps = len(plan.get("steps", []))
+                    yield {
+                        "type": "plan",
+                        "plan_data": plan_data,
+                        "plan_type": plan_type
                     }
         
         if not full_content and plan_data:
-            full_content = "I have created an analysis plan for you. Please review and confirm it below."
+            if plan_type == "multi":
+                steps_count = len(json.loads(plan_data).get("steps", []))
+                full_content = f"I have created a **multi-step analysis plan** with {steps_count} steps. Please review and confirm it below."
+            else:
+                full_content = "I have created an analysis plan for you. Please review and confirm it below."
         
         yield {
             "type": "done",
             "full_content": full_content,
-            "plan_data": json.dumps(plan_data) if plan_data else None
+            "plan_data": plan_data,
+            "plan_type": plan_type
         }
         
     except Exception as e:
@@ -133,3 +204,106 @@ async def run_copilot_planner_stream(
             "type": "error",
             "message": str(e)
         }
+
+async def analyze_error_and_fix(
+    original_code: str,
+    error_message: str,
+    stdout: str,
+    data_context: str,
+    retry_count: int,
+    max_retries: int = 3
+) -> Dict[str, Any]:
+    """
+    让 LLM 分析错误并生成修复代码
+    """
+    llm = get_llm()
+    
+    prompt = f"""You are a Python debugging expert. A code execution failed.
+
+## Original Code:
+```python
+{original_code}
+```
+
+## Error Message:
+```
+{error_message[:2000]}
+```
+
+## Standard Output:
+```
+{stdout[:1000]}
+```
+
+## Available Data Context:
+{data_context}
+
+## Retry Count: {retry_count}/{max_retries}
+
+Analyze the error and provide a fix. Output ONLY a JSON object with this structure:
+{{
+    "analysis": "Brief explanation of what went wrong",
+    "fix_description": "What was changed to fix it",
+    "fixed_code": "The corrected Python code"
+}}
+
+CRITICAL RULES:
+1. The fixed_code must be COMPLETE and RUNNABLE Python code
+2. Do NOT use any undefined variables
+3. Read data from '/data' directory
+4. Save outputs to '/workspace' directory
+5. Handle edge cases (missing files, empty data, etc.)
+6. Add proper error handling with try/except blocks
+"""
+
+    try:
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        
+        content = response.content
+        
+        json_match = re.search(r'\{[\s\S]*\}', content)
+        if json_match:
+            result = json.loads(json_match.group())
+        else:
+            code_match = re.search(r'```python\s*([\s\S]*?)\s*```', content)
+            if code_match:
+                fixed_code = code_match.group(1).strip()
+            else:
+                fixed_code = original_code
+            
+            result = {
+                "analysis": "Could not parse structured response",
+                "fix_description": "Applied general fixes",
+                "fixed_code": fixed_code
+            }
+        
+        if not result.get("fixed_code"):
+            code_match = re.search(r'```python\s*([\s\S]*?)\s*```', content)
+            if code_match:
+                result["fixed_code"] = code_match.group(1).strip()
+            else:
+                result["fixed_code"] = original_code
+        
+        print(f"🔧 [Error Fix] Retry {retry_count}/{max_retries}: {result.get('analysis', 'Unknown error')[:100]}", flush=True)
+        
+        return result
+        
+    except Exception as e:
+        print(f"❌ [Error Fix] Failed to analyze: {e}", flush=True)
+        return {
+            "analysis": f"LLM analysis failed: {str(e)}",
+            "fix_description": "Returning original code",
+            "fixed_code": original_code
+        }
+
+def extract_code_from_response(response_text: str) -> str:
+    """从 LLM 响应中提取 Python 代码"""
+    code_match = re.search(r'```python\s*([\s\S]*?)\s*```', response_text)
+    if code_match:
+        return code_match.group(1).strip()
+    
+    json_match = re.search(r'"fixed_code":\s*"([\s\S]*?)"', response_text)
+    if json_match:
+        return json_match.group(1).replace('\\n', '\n').replace('\\"', '"')
+    
+    return response_text

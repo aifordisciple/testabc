@@ -197,22 +197,53 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
     }
   };
 
-  const handleConfirmPlan = async (planDataStr: string) => {
-    const toastId = toast.loading('Submitting task to cluster...');
+  const handleConfirmPlan = async (planDataStr: string) =>    const toastId = toast.loading('Submitting task to cluster...')
     try {
-      const token = localStorage.getItem('token');
-      const plan = JSON.parse(planDataStr);
-      
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/execute-plan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ plan_data: plan, session_id: currentSession })
-      });
-      
-      if (!res.ok) {
-          const errData = await res.json();
-          throw new Error(errData.detail || 'Failed to execute plan');
-      }
+        const token = localStorage.getItem('token')
+        const plan = JSON.parse(planDataStr)
+        const planType = plan.type || 'single'
+        
+        if (planType === 'multi') {
+            const res = await fetch(
+                `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/execute-chain`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                    body: JSON.stringify({ plan_data: plan, session_id: currentSession })
+                })
+                
+                if (!res.ok) {
+                    const errData = await res.json()
+                    throw new Error(errData.detail || 'Failed to execute chain')
+                }
+                
+                toast.success('Task chain submitted successfully!', { id: toastId })
+            } catch (e: any) {
+                toast.error(e.message, { id: toastId, duration: 6000 })
+            }
+        } else        
+        const toastId = toast.loading('Submitting task to cluster...')
+        try {
+            const token = localStorage.getItem('token')
+            const plan = JSON.parse(planDataStr)
+            
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/execute-plan`,                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ plan_data: plan, session_id: currentSession })
+            })
+            
+            if (!res.ok) {
+                const errData = await res.json()
+                throw new Error(errData.detail || 'Failed to execute plan')
+            }
+            
+            toast.success('Task submitted successfully!', { id: toastId })
+            await fetchHistory() 
+        } catch (e: any) {
+            toast.error(e.message, { id: toastId, duration: 6000 })
+        }
+    }
+
       
       toast.success('Task submitted successfully!', { id: toastId });
       await fetchHistory(); 
@@ -353,31 +384,90 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
     try { plan = JSON.parse(planDataStr); } catch { return null; }
 
     return (
-      <div className="mt-4 bg-gray-900 border border-emerald-900/50 rounded-xl p-5 shadow-lg relative overflow-hidden">
-         <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
-         <h4 className="text-lg font-bold text-white mb-2 flex items-center gap-2">📋 Analysis Strategy Proposal</h4>
-         <p className="text-gray-300 text-sm mb-4 leading-relaxed">{plan.strategy}</p>
-         
-         <div className="bg-gray-950 rounded border border-gray-800 p-3 mb-5">
-            <div className="text-xs text-gray-500 uppercase font-bold mb-1 tracking-wider">Routing Details</div>
+      <div className="mt-4 bg-gradient-to-br from-gray-900 via-gray-900 to-gray-800 border border-emerald-500/30 rounded-2xl shadow-2xl relative overflow-hidden">
+        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500"></div>
+        
+        <div className="p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/20 flex items-center justify-center">
+              <svg className="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+              </svg>
+            </div>
+            <div>
+              <h4 className="text-lg font-bold text-white">Analysis Strategy</h4>
+              <p className="text-xs text-emerald-400">Review and confirm to execute</p>
+            </div>
+          </div>
+          
+          <div className="bg-gray-950/50 rounded-xl p-4 mb-5 border border-gray-700/50">
+            <div className="flex items-start gap-2">
+              <span className="text-lg">💡</span>
+              <p className="text-gray-300 text-sm leading-relaxed flex-1">{plan.strategy}</p>
+            </div>
+          </div>
+          
+          <div className="mb-5">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-2 h-2 rounded-full bg-blue-400"></div>
+              <span className="text-xs text-gray-400 uppercase tracking-wider font-semibold">Execution Method</span>
+            </div>
+            
             {plan.method === 'workflow' ? (
-                <div><span className="text-blue-400 font-medium">Standard Tool/Pipeline ➔ </span><span className="text-white">{plan.workflow_name}</span></div>
-            ) : (
-                <div>
-                   <span className="text-purple-400 font-medium">Custom Sandbox Code ➔ </span><span className="text-white">Python Env</span>
-                   <div className="mt-2 p-2 bg-[#0d1117] rounded text-xs text-green-400 font-mono overflow-x-auto max-h-48">
-                     {plan.custom_code}
-                   </div>
+              <div className="flex items-center gap-3 bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
+                <div className="w-12 h-12 rounded-lg bg-blue-500/20 flex items-center justify-center flex-shrink-0">
+                  <svg className="w-6 h-6 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                  </svg>
                 </div>
+                <div>
+                  <div className="text-xs text-blue-300 mb-1">Predefined Pipeline</div>
+                  <div className="text-white font-mono font-semibold">{plan.workflow_name}</div>
+                </div>
+              </div>
+            ) : (
+              <div className="bg-purple-500/10 border border-purple-500/30 rounded-xl overflow-hidden">
+                <div className="flex items-center gap-3 p-4 border-b border-purple-500/20">
+                  <div className="w-10 h-10 rounded-lg bg-purple-500/20 flex items-center justify-center flex-shrink-0">
+                    <svg className="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+                    </svg>
+                  </div>
+                  <div>
+                    <div className="text-xs text-purple-300">Custom Python Code</div>
+                    <div className="text-white text-sm">Sandbox Environment</div>
+                  </div>
+                </div>
+                <div className="relative">
+                  <div className="absolute top-2 left-0 right-0 flex items-center justify-between px-4 z-10">
+                    <span className="text-[10px] text-gray-500 font-mono">python</span>
+                    <div className="flex gap-1">
+                      <div className="w-2 h-2 rounded-full bg-red-500/50"></div>
+                      <div className="w-2 h-2 rounded-full bg-yellow-500/50"></div>
+                      <div className="w-2 h-2 rounded-full bg-green-500/50"></div>
+                    </div>
+                  </div>
+                  <pre className="bg-[#0d1117] p-4 pt-8 text-xs text-green-400 font-mono overflow-x-auto max-h-64 overflow-y-auto leading-relaxed">
+                    <code>{plan.custom_code}</code>
+                  </pre>
+                </div>
+              </div>
             )}
-         </div>
+          </div>
 
-         <div className="flex gap-3">
-            <button onClick={() => handleConfirmPlan(planDataStr)} className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                Confirm & Execute
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => handleConfirmPlan(planDataStr)} 
+              className="flex-1 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white px-5 py-3 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              Execute Analysis
             </button>
-         </div>
+          </div>
+        </div>
       </div>
     );
   };

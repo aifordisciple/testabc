@@ -3,6 +3,7 @@ import json
 import uuid
 import subprocess
 import base64
+from datetime import datetime
 from celery import Celery
 from celery.schedules import crontab
 from sqlmodel import Session
@@ -13,7 +14,7 @@ from app.services.workflow_service import workflow_service
 from app.services.geo_service import geo_service
 from app.services.knowledge_service import knowledge_service
 from app.services.sandbox import sandbox_service
-from app.models.user import Analysis, CopilotMessage, Project, File, ProjectFileLink
+from app.models.user import Analysis, CopilotMessage, Project, File, ProjectFileLink, TaskChain
 
 celery_app = Celery(
     "worker",
@@ -95,6 +96,113 @@ def run_ai_workflow_task(analysis_id: str, session_id: str = "default"):
     except Exception as e:
         print(f"❌ [AI Celery] System error: {e}")
 
+SETUP_CODE = """import os
+import warnings
+warnings.filterwarnings('ignore')
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import pandas as pd
+
+DATA_DIR = '/data'
+WORK_DIR = '/workspace'
+os.chdir(WORK_DIR)
+"""
+
+def _save_files_to_project(db: Session, project_id: str, files: list, res: dict):
+    """保存生成的文件到项目目录并记录到数据库"""
+    upload_root = os.getenv("UPLOAD_ROOT", "/data/uploads")
+    save_dir = os.path.join(upload_root, str(project_id))
+    os.makedirs(save_dir, exist_ok=True)
+    
+    project = db.get(Project, uuid.UUID(project_id))
+    if not project:
+        return []
+    
+    saved_files = []
+    for file_info in files:
+        if isinstance(file_info, dict):
+            fname = file_info.get("name", "output.txt")
+            fpath = os.path.join(save_dir, fname)
+            
+            fdir = os.path.dirname(fpath)
+            if fdir:
+                os.makedirs(fdir, exist_ok=True)
+            
+            try:
+                file_type = file_info.get("type", "text")
+                
+                if file_type == "image" and file_info.get("data"):
+                    b64_str = file_info['data'].split(",")[1]
+                    with open(fpath, "wb") as f:
+                        f.write(base64.b64decode(b64_str))
+                    saved_files.append({"type": "image", "name": fname, "data": file_info['data']})
+                    print(f"📊 [Worker] Saved image: {fname}", flush=True)
+                    
+                elif file_type == "pdf" and file_info.get("data"):
+                    b64_str = file_info['data'].split(",")[1]
+                    with open(fpath, "wb") as f:
+                        f.write(base64.b64decode(b64_str))
+                    saved_files.append({"type": "pdf", "name": fname, "data": file_info['data']})
+                    print(f"📄 [Worker] Saved PDF: {fname}", flush=True)
+                    
+                elif file_type == "text" and file_info.get("content"):
+                    with open(fpath, "w", encoding="utf-8") as f:
+                        f.write(file_info['content'])
+                    
+                    if fname.endswith(('.csv', '.tsv')):
+                        preview_lines = file_info['content'].split('\n')[:20]
+                        saved_files.append({
+                            "type": "table", "name": fname,
+                            "preview": '\n'.join(preview_lines), "full_available": True
+                        })
+                    print(f"📝 [Worker] Saved text: {fname}", flush=True)
+                    
+                elif file_type == "binary" and file_info.get("data"):
+                    b64_str = file_info['data'].split(",")[1]
+                    with open(fpath, "wb") as f:
+                        f.write(base64.b64decode(b64_str))
+                    print(f"📦 [Worker] Saved binary: {fname}", flush=True)
+                
+                if os.path.exists(fpath):
+                    fsize = os.path.getsize(fpath)
+                    content_type = "application/octet-stream"
+                    if file_type == "image":
+                        content_type = "image/" + fname.split('.')[-1]
+                    elif file_type == "pdf":
+                        content_type = "application/pdf"
+                    elif file_type == "text":
+                        content_type = "text/plain"
+                    
+                    db_file = File(
+                        filename=fname, size=fsize,
+                        content_type=content_type,
+                        s3_key=f"{project_id}/{fname}",
+                        uploader_id=project.owner_id
+                    )
+                    db.add(db_file)
+                    db.commit()
+                    db.refresh(db_file)
+                    
+                    db.add(ProjectFileLink(project_id=project.id, file_id=db_file.id))
+                    db.commit()
+                    
+            except Exception as e:
+                print(f"❌ [Worker] Failed to save file {fname}: {e}", flush=True)
+    
+    return saved_files
+
+def _send_progress_message(db: Session, project_id: str, session_id: str, content: str):
+    """发送进度消息到聊天"""
+    msg = CopilotMessage(
+        project_id=uuid.UUID(project_id),
+        session_id=session_id,
+        role="assistant",
+        content=content
+    )
+    db.add(msg)
+    db.commit()
+
 @celery_app.task(name="run_sandbox_task")
 def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, session_id: str = "default"):
     print(f"🚀 [Sandbox Task] Starting custom analysis {analysis_id}")
@@ -116,19 +224,7 @@ def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, sessio
             f.write("🚀 Starting AI Custom Sandbox Execution...\n")
             f.write("=" * 50 + "\nExecuting Code:\n" + custom_code + "\n" + "=" * 50 + "\n\n")
             
-        setup_code = """import os
-import warnings
-warnings.filterwarnings('ignore')
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import pandas as pd
-
-DATA_DIR = '/data'
-WORK_DIR = '/workspace'
-os.chdir(WORK_DIR)
-"""
-        res = sandbox_service.execute_python(project_id, setup_code + "\n" + custom_code)
+        res = sandbox_service.execute_python(project_id, SETUP_CODE + "\n" + custom_code)
 
         with open(log_file, "a", encoding="utf-8") as f:
             if res['stdout']: f.write("STDOUT:\n" + res['stdout'] + "\n")
@@ -152,101 +248,7 @@ os.chdir(WORK_DIR)
             
             if res.get('files') and project:
                 md_msg += "**Generated Results:**\n\n"
-                
-                upload_root = os.getenv("UPLOAD_ROOT", "/data/uploads")
-                save_dir = os.path.join(upload_root, str(project_id))
-                os.makedirs(save_dir, exist_ok=True)
-                
-                for file_info in res['files']:
-                    if isinstance(file_info, dict):
-                        fname = file_info.get("name", "output.txt")
-                        fpath = os.path.join(save_dir, fname)
-                        
-                        try:
-                            file_type = file_info.get("type", "text")
-                            
-                            if file_type == "image" and file_info.get("data"):
-                                b64_str = file_info['data'].split(",")[1]
-                                with open(fpath, "wb") as f:
-                                    f.write(base64.b64decode(b64_str))
-                                
-                                attachments.append({
-                                    "type": "image",
-                                    "name": fname,
-                                    "data": file_info['data']
-                                })
-                                print(f"📊 [Sandbox Task] Saved image: {fname}", flush=True)
-                                
-                            elif file_type == "pdf" and file_info.get("data"):
-                                b64_str = file_info['data'].split(",")[1]
-                                with open(fpath, "wb") as f:
-                                    f.write(base64.b64decode(b64_str))
-                                
-                                attachments.append({
-                                    "type": "pdf",
-                                    "name": fname,
-                                    "data": file_info['data']
-                                })
-                                md_msg += f"- 📄 `{fname}` (PDF)\n"
-                                print(f"📄 [Sandbox Task] Saved PDF: {fname}", flush=True)
-                                
-                            elif file_type == "text" and file_info.get("content"):
-                                with open(fpath, "w", encoding="utf-8") as f:
-                                    f.write(file_info['content'])
-                                
-                                content = file_info['content']
-                                preview_lines = content.split('\n')[:20]
-                                
-                                if fname.endswith(('.csv', '.tsv')):
-                                    attachments.append({
-                                        "type": "table",
-                                        "name": fname,
-                                        "preview": '\n'.join(preview_lines),
-                                        "full_available": True
-                                    })
-                                    print(f"📊 [Sandbox Task] Saved table: {fname}", flush=True)
-                                else:
-                                    md_msg += f"- 📄 `{fname}`\n"
-                                    print(f"📝 [Sandbox Task] Saved text: {fname}", flush=True)
-                                    
-                            elif file_type == "binary" and file_info.get("data"):
-                                b64_str = file_info['data'].split(",")[1]
-                                with open(fpath, "wb") as f:
-                                    f.write(base64.b64decode(b64_str))
-                                md_msg += f"- 📦 `{fname}` (Binary)\n"
-                                print(f"📦 [Sandbox Task] Saved binary: {fname}", flush=True)
-                            else:
-                                md_msg += f"- 📄 `{fname}`\n"
-                            
-                            if os.path.exists(fpath):
-                                fsize = os.path.getsize(fpath)
-                                content_type = "application/octet-stream"
-                                if file_type == "image":
-                                    content_type = "image/" + fname.split('.')[-1]
-                                elif file_type == "pdf":
-                                    content_type = "application/pdf"
-                                elif file_type == "text":
-                                    content_type = "text/plain"
-                                
-                                db_file = File(
-                                    filename=fname, size=fsize,
-                                    content_type=content_type,
-                                    s3_key=f"{project_id}/{fname}",
-                                    uploader_id=project.owner_id
-                                )
-                                db.add(db_file)
-                                db.commit()
-                                db.refresh(db_file)
-                                
-                                db.add(ProjectFileLink(project_id=project.id, file_id=db_file.id))
-                                db.commit()
-                            
-                        except Exception as e:
-                            print(f"❌ [Sandbox Task] Failed to save file {fname}: {e}", flush=True)
-                            md_msg += f"- ⚠️ `{fname}` (save failed)\n"
-                    else:
-                        md_msg += f"- 📄 `{file_info}`\n"
-                
+                attachments = _save_files_to_project(db, project_id, res['files'], res)
                 md_msg += "\n*(Files are stored in your **Files** tab)*\n\n"
             
             if res.get('stdout'):
@@ -290,3 +292,176 @@ os.chdir(WORK_DIR)
                 db.commit()
         except Exception as inner_e:
             print(f"❌ [Sandbox Task] Failed to save error message: {inner_e}", flush=True)
+
+@celery_app.task(name="run_task_chain")
+def run_task_chain(chain_id: str):
+    """
+    执行多步骤任务链，支持自动错误恢复
+    """
+    print(f"🔗 [Task Chain] Starting chain {chain_id}", flush=True)
+    
+    try:
+        with Session(engine) as db:
+            chain = db.get(TaskChain, uuid.UUID(chain_id))
+            if not chain:
+                print(f"❌ [Task Chain] Chain {chain_id} not found")
+                return
+            
+            chain.status = "running"
+            db.commit()
+            
+            project_id = str(chain.project_id)
+            session_id = chain.session_id
+            steps = json.loads(chain.steps_json)
+            total_steps = len(steps)
+            
+            _send_progress_message(
+                db, project_id, session_id,
+                f"🚀 **Task Chain Started** (ID: `{chain_id[:8]}`)\n\n"
+                f"Total steps: {total_steps}\n"
+                f"Strategy: {chain.strategy or 'N/A'}\n\n"
+                f"I will notify you as each step completes."
+            )
+            
+            all_attachments = []
+            
+            for step_info in steps:
+                step_num = step_info.get("step", chain.current_step + 1)
+                action = step_info.get("action", "Unknown")
+                code = step_info.get("code", "")
+                expected_output = step_info.get("expected_output", "")
+                
+                chain.current_step = step_num - 1
+                db.commit()
+                
+                _send_progress_message(
+                    db, project_id, session_id,
+                    f"⏳ **Step {step_num}/{total_steps}**: {action}\n\n"
+                    f"Expected: {expected_output}"
+                )
+                
+                print(f"🔗 [Task Chain] Step {step_num}/{total_steps}: {action}", flush=True)
+                
+                retry_count = 0
+                max_retries = 3
+                success = False
+                res = {"success": False, "stdout": "", "stderr": "No execution attempted", "files": []}
+                
+                while retry_count < max_retries and not success:
+                    res = sandbox_service.execute_python(
+                        project_id=project_id,
+                        code=SETUP_CODE + "\n" + code,
+                        timeout=180,
+                        restore_context=(step_num > 1)
+                    )
+                    
+                    success = res['success']
+                    
+                    if not success and retry_count < max_retries - 1:
+                        retry_count += 1
+                        
+                        from app.core.agent import analyze_error_and_fix
+                        import asyncio
+                        
+                        data_context = sandbox_service._get_data_context(project_id)
+                        
+                        fix_result = asyncio.run(analyze_error_and_fix(
+                            original_code=code,
+                            error_message=res['stderr'],
+                            stdout=res['stdout'],
+                            data_context=data_context,
+                            retry_count=retry_count,
+                            max_retries=max_retries
+                        ))
+                        
+                        code = fix_result.get('fixed_code', code)
+                        
+                        _send_progress_message(
+                            db, project_id, session_id,
+                            f"🔄 **Step {step_num} Auto-Retry** ({retry_count}/{max_retries})\n\n"
+                            f"**Analysis:** {fix_result.get('analysis', 'N/A')[:200]}...\n\n"
+                            f"Attempting fix..."
+                        )
+                        
+                        chain.retry_count = retry_count
+                        chain.last_error = res['stderr'][:500] if res['stderr'] else None
+                        db.commit()
+                
+                if success:
+                    chain.retry_count = 0
+                    chain.last_error = None
+                    db.commit()
+                    
+                    if res.get('files'):
+                        saved = _save_files_to_project(db, project_id, res['files'], res)
+                        all_attachments.extend(saved)
+                    
+                    _send_progress_message(
+                        db, project_id, session_id,
+                        f"✅ **Step {step_num}/{total_steps} Completed**: {action}\n\n"
+                        f"Output: {expected_output}"
+                    )
+                    
+                    print(f"✅ [Task Chain] Step {step_num} completed", flush=True)
+                else:
+                    chain.status = "failed"
+                    db.commit()
+                    
+                    _send_progress_message(
+                        db, project_id, session_id,
+                        f"### ❌ Task Chain Failed at Step {step_num}\n\n"
+                        f"**Action:** {action}\n\n"
+                        f"**Error:**\n```\n{res['stderr'][:1000] if res['stderr'] else 'Unknown error'}\n```\n\n"
+                        f"After {max_retries} auto-retry attempts, the task could not be completed."
+                    )
+                    
+                    print(f"❌ [Task Chain] Failed at step {step_num}", flush=True)
+                    return
+            
+            chain.status = "completed"
+            chain.current_step = total_steps
+            db.commit()
+            
+            final_msg = f"### 🎉 Task Chain Completed!\n\n"
+            final_msg += f"**Strategy:** {chain.strategy or 'N/A'}\n\n"
+            final_msg += f"**Steps Completed:** {total_steps}/{total_steps}\n\n"
+            
+            if all_attachments:
+                final_msg += "**Generated Files:**\n"
+                for att in all_attachments:
+                    final_msg += f"- 📄 `{att['name']}`\n"
+            
+            msg = CopilotMessage(
+                project_id=chain.project_id,
+                session_id=session_id,
+                role="assistant",
+                content=final_msg,
+                attachments=json.dumps(all_attachments) if all_attachments else None
+            )
+            db.add(msg)
+            db.commit()
+            
+            print(f"✅ [Task Chain] Chain {chain_id} completed successfully", flush=True)
+            
+    except Exception as e:
+        print(f"❌ [Task Chain] Critical error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        
+        try:
+            with Session(engine) as db:
+                chain = db.get(TaskChain, uuid.UUID(chain_id))
+                if chain:
+                    chain.status = "failed"
+                    db.commit()
+                    
+                    msg = CopilotMessage(
+                        project_id=chain.project_id,
+                        session_id=chain.session_id,
+                        role="assistant",
+                        content=f"### ❌ Task Chain Failed\n\n**Error:** `{str(e)}`"
+                    )
+                    db.add(msg)
+                    db.commit()
+        except Exception as inner_e:
+            print(f"❌ [Task Chain] Failed to save error: {inner_e}", flush=True)

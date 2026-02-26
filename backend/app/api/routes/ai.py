@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from app.core.db import get_session
 from app.api.deps import get_current_user
-from app.models.user import User, Project, Analysis, CopilotMessage, File, ProjectFileLink, SampleSheet
+from app.models.user import User, Project, Analysis, CopilotMessage, File, ProjectFileLink, SampleSheet, TaskChain
 from app.models.bio import WorkflowTemplate
 from app.core.llm import llm_client
 from app.core.agent import run_copilot_planner, run_copilot_planner_stream
@@ -278,6 +278,101 @@ def execute_plan(project_id: uuid.UUID, payload: ExecutePlanRequest, session: Se
     session.commit()
 
     return {"status": "success", "analysis_id": str(analysis.id)}
+
+# ================================
+# 4. 多步骤任务链执行端点
+# ================================
+class ExecuteChainRequest(BaseModel):
+    plan_data: dict
+    session_id: str = "default"
+
+@router.post("/projects/{project_id}/chat/execute-chain")
+def execute_task_chain(project_id: uuid.UUID, payload: ExecuteChainRequest, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
+    project = session.get(Project, project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    plan = payload.plan_data
+    strategy = plan.get("strategy", "")
+    steps = plan.get("steps", [])
+    
+    if not steps:
+        raise HTTPException(status_code=400, detail="No steps provided in plan")
+
+    total_steps = len(steps)
+    
+    chain = TaskChain(
+        project_id=project_id,
+        session_id=payload.session_id,
+        status="pending",
+        current_step=0,
+        total_steps=total_steps,
+        strategy=strategy,
+        steps_json=json.dumps(steps)
+    )
+    session.add(chain)
+    session.commit()
+    session.refresh(chain)
+
+    from app.worker import run_task_chain
+    run_task_chain.delay(str(chain.id))
+
+    steps_preview = "\n".join([f"| {s.get('step', i+1)} | {s.get('action', 'N/A')} | {s.get('expected_output', 'N/A')[:30]}... |" for i, s in enumerate(steps)])
+    
+    sys_msg = CopilotMessage(
+        project_id=project_id, 
+        session_id=payload.session_id, 
+        role="assistant", 
+        content=f"🔗 **Multi-Step Task Chain Started!** (ID: `{str(chain.id)[:8]}`)\n\n"
+                f"**Strategy:** {strategy}\n\n"
+                f"**Steps:**\n| Step | Action | Expected Output |\n|------|--------|----------------|\n{steps_preview}\n\n"
+                f"I will execute each step sequentially and notify you of progress!"
+    )
+    session.add(sys_msg)
+    session.commit()
+
+    return {"status": "success", "chain_id": str(chain.id), "total_steps": total_steps}
+
+@router.get("/projects/{project_id}/chains")
+def get_task_chains(project_id: uuid.UUID, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
+    project = session.get(Project, project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    
+    chains = session.exec(select(TaskChain).where(TaskChain.project_id == project_id).order_by(TaskChain.created_at.desc())).all()
+    
+    return [{
+        "id": str(c.id),
+        "status": c.status,
+        "current_step": c.current_step,
+        "total_steps": c.total_steps,
+        "strategy": c.strategy,
+        "retry_count": c.retry_count,
+        "created_at": c.created_at.isoformat()
+    } for c in chains]
+
+@router.get("/projects/{project_id}/chains/{chain_id}")
+def get_task_chain_detail(project_id: uuid.UUID, chain_id: uuid.UUID, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
+    project = session.get(Project, project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    
+    chain = session.get(TaskChain, chain_id)
+    if not chain or chain.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Task chain not found")
+    
+    return {
+        "id": str(chain.id),
+        "status": chain.status,
+        "current_step": chain.current_step,
+        "total_steps": chain.total_steps,
+        "strategy": chain.strategy,
+        "steps": json.loads(chain.steps_json),
+        "retry_count": chain.retry_count,
+        "last_error": chain.last_error,
+        "created_at": chain.created_at.isoformat(),
+        "updated_at": chain.updated_at.isoformat()
+    }
 
 # ================================
 # 3. 错误诊断功能
