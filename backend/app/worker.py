@@ -99,21 +99,24 @@ def run_ai_workflow_task(analysis_id: str, session_id: str = "default"):
 def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, session_id: str = "default"):
     print(f"🚀 [Sandbox Task] Starting custom analysis {analysis_id}")
     
-    with Session(engine) as db:
-        analysis = db.get(Analysis, uuid.UUID(analysis_id))
-        if not analysis: return
-        analysis.status = "running"
-        work_dir = os.path.join(workflow_service.base_work_dir, analysis_id)
-        os.makedirs(work_dir, exist_ok=True)
-        analysis.work_dir = work_dir
-        db.commit()
+    try:
+        with Session(engine) as db:
+            analysis = db.get(Analysis, uuid.UUID(analysis_id))
+            if not analysis:
+                print(f"❌ [Sandbox Task] Analysis {analysis_id} not found")
+                return
+            analysis.status = "running"
+            work_dir = os.path.join(workflow_service.base_work_dir, analysis_id)
+            os.makedirs(work_dir, exist_ok=True)
+            analysis.work_dir = work_dir
+            db.commit()
 
-    log_file = os.path.join(work_dir, "analysis.log")
-    with open(log_file, "w", encoding="utf-8") as f:
-        f.write("🚀 Starting AI Custom Sandbox Execution...\n")
-        f.write("=" * 50 + "\nExecuting Code:\n" + custom_code + "\n" + "=" * 50 + "\n\n")
-        
-    setup_code = """import os
+        log_file = os.path.join(work_dir, "analysis.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write("🚀 Starting AI Custom Sandbox Execution...\n")
+            f.write("=" * 50 + "\nExecuting Code:\n" + custom_code + "\n" + "=" * 50 + "\n\n")
+            
+        setup_code = """import os
 import warnings
 warnings.filterwarnings('ignore')
 import matplotlib
@@ -125,101 +128,165 @@ DATA_DIR = '/data'
 WORK_DIR = '/workspace'
 os.chdir(WORK_DIR)
 """
-    res = sandbox_service.execute_python(project_id, setup_code + "\n" + custom_code)
+        res = sandbox_service.execute_python(project_id, setup_code + "\n" + custom_code)
 
-    with open(log_file, "a", encoding="utf-8") as f:
-        if res['stdout']: f.write("STDOUT:\n" + res['stdout'] + "\n")
-        if res['stderr']: f.write("STDERR:\n" + res['stderr'] + "\n")
-        f.write("\n\n🏁 Execution Finished.\n")
+        with open(log_file, "a", encoding="utf-8") as f:
+            if res['stdout']: f.write("STDOUT:\n" + res['stdout'] + "\n")
+            if res['stderr']: f.write("STDERR:\n" + res['stderr'] + "\n")
+            f.write("\n\n🏁 Execution Finished.\n")
 
-    with Session(engine) as db:
-        analysis = db.get(Analysis, uuid.UUID(analysis_id))
-        if analysis:
-            analysis.status = "completed" if res['success'] else "failed"
-        
-        project = db.get(Project, uuid.UUID(project_id))
-        status_icon = "✅" if res['success'] else "❌"
-        md_msg = f"### {status_icon} Sandbox Analysis Finished (ID: `{analysis_id[:8]}`)\n\n"
-        
-        attachments = []
-        
-        if res['files'] and project:
-            md_msg += "**Generated Results:**\n\n"
+        print(f"📊 [Sandbox Task] Execution result: success={res['success']}, files={len(res.get('files', []))}", flush=True)
+
+        with Session(engine) as db:
+            analysis = db.get(Analysis, uuid.UUID(analysis_id))
+            if analysis:
+                analysis.status = "completed" if res['success'] else "failed"
+                db.commit()
+                print(f"✅ [Sandbox Task] Updated analysis status to: {analysis.status}", flush=True)
             
-            upload_root = os.getenv("UPLOAD_ROOT", "/data/uploads")
-            save_dir = os.path.join(upload_root, str(project_id))
-            os.makedirs(save_dir, exist_ok=True)
+            project = db.get(Project, uuid.UUID(project_id))
+            status_icon = "✅" if res['success'] else "❌"
+            md_msg = f"### {status_icon} Sandbox Analysis Finished (ID: `{analysis_id[:8]}`)\n\n"
             
-            for file_info in res['files']:
-                if isinstance(file_info, dict):
-                    fname = file_info.get("name", "output.txt")
-                    fpath = os.path.join(save_dir, fname)
-                    
-                    try:
-                        if file_info.get("type") == "image":
-                            b64_str = file_info['data'].split(",")[1]
-                            with open(fpath, "wb") as f:
-                                f.write(base64.b64decode(b64_str))
+            attachments = []
+            
+            if res.get('files') and project:
+                md_msg += "**Generated Results:**\n\n"
+                
+                upload_root = os.getenv("UPLOAD_ROOT", "/data/uploads")
+                save_dir = os.path.join(upload_root, str(project_id))
+                os.makedirs(save_dir, exist_ok=True)
+                
+                for file_info in res['files']:
+                    if isinstance(file_info, dict):
+                        fname = file_info.get("name", "output.txt")
+                        fpath = os.path.join(save_dir, fname)
+                        
+                        try:
+                            file_type = file_info.get("type", "text")
                             
-                            attachments.append({
-                                "type": "image",
-                                "name": fname,
-                                "data": file_info['data']
-                            })
-                        else:
-                            with open(fpath, "w", encoding="utf-8") as f:
-                                f.write(file_info.get("content", ""))
-                            
-                            content = file_info.get("content", "")
-                            preview_lines = content.split('\n')[:20]
-                            
-                            if fname.endswith(('.csv', '.tsv')):
+                            if file_type == "image" and file_info.get("data"):
+                                b64_str = file_info['data'].split(",")[1]
+                                with open(fpath, "wb") as f:
+                                    f.write(base64.b64decode(b64_str))
+                                
                                 attachments.append({
-                                    "type": "table",
+                                    "type": "image",
                                     "name": fname,
-                                    "preview": '\n'.join(preview_lines),
-                                    "full_available": True
+                                    "data": file_info['data']
                                 })
+                                print(f"📊 [Sandbox Task] Saved image: {fname}", flush=True)
+                                
+                            elif file_type == "pdf" and file_info.get("data"):
+                                b64_str = file_info['data'].split(",")[1]
+                                with open(fpath, "wb") as f:
+                                    f.write(base64.b64decode(b64_str))
+                                
+                                attachments.append({
+                                    "type": "pdf",
+                                    "name": fname,
+                                    "data": file_info['data']
+                                })
+                                md_msg += f"- 📄 `{fname}` (PDF)\n"
+                                print(f"📄 [Sandbox Task] Saved PDF: {fname}", flush=True)
+                                
+                            elif file_type == "text" and file_info.get("content"):
+                                with open(fpath, "w", encoding="utf-8") as f:
+                                    f.write(file_info['content'])
+                                
+                                content = file_info['content']
+                                preview_lines = content.split('\n')[:20]
+                                
+                                if fname.endswith(('.csv', '.tsv')):
+                                    attachments.append({
+                                        "type": "table",
+                                        "name": fname,
+                                        "preview": '\n'.join(preview_lines),
+                                        "full_available": True
+                                    })
+                                    print(f"📊 [Sandbox Task] Saved table: {fname}", flush=True)
+                                else:
+                                    md_msg += f"- 📄 `{fname}`\n"
+                                    print(f"📝 [Sandbox Task] Saved text: {fname}", flush=True)
+                                    
+                            elif file_type == "binary" and file_info.get("data"):
+                                b64_str = file_info['data'].split(",")[1]
+                                with open(fpath, "wb") as f:
+                                    f.write(base64.b64decode(b64_str))
+                                md_msg += f"- 📦 `{fname}` (Binary)\n"
+                                print(f"📦 [Sandbox Task] Saved binary: {fname}", flush=True)
                             else:
                                 md_msg += f"- 📄 `{fname}`\n"
                             
-                        fsize = os.path.getsize(fpath)
-                        content_type = "image/" + fname.split('.')[-1] if file_info.get("type") == "image" else "text/plain"
-                        
-                        db_file = File(
-                            filename=fname, size=fsize,
-                            content_type=content_type,
-                            s3_key=f"{project_id}/{fname}",
-                            uploader_id=project.owner_id
-                        )
-                        db.add(db_file)
-                        db.commit()
-                        db.refresh(db_file)
-                        
-                        db.add(ProjectFileLink(project_id=project.id, file_id=db_file.id))
-                        db.commit()
-                        
-                    except Exception as e:
-                        print(f"❌ Failed to save sandbox file {fname}: {e}")
-                else:
-                    md_msg += f"- 📄 `{file_info}`\n"
+                            if os.path.exists(fpath):
+                                fsize = os.path.getsize(fpath)
+                                content_type = "application/octet-stream"
+                                if file_type == "image":
+                                    content_type = "image/" + fname.split('.')[-1]
+                                elif file_type == "pdf":
+                                    content_type = "application/pdf"
+                                elif file_type == "text":
+                                    content_type = "text/plain"
+                                
+                                db_file = File(
+                                    filename=fname, size=fsize,
+                                    content_type=content_type,
+                                    s3_key=f"{project_id}/{fname}",
+                                    uploader_id=project.owner_id
+                                )
+                                db.add(db_file)
+                                db.commit()
+                                db.refresh(db_file)
+                                
+                                db.add(ProjectFileLink(project_id=project.id, file_id=db_file.id))
+                                db.commit()
+                            
+                        except Exception as e:
+                            print(f"❌ [Sandbox Task] Failed to save file {fname}: {e}", flush=True)
+                            md_msg += f"- ⚠️ `{fname}` (save failed)\n"
+                    else:
+                        md_msg += f"- 📄 `{file_info}`\n"
+                
+                md_msg += "\n*(Files are stored in your **Files** tab)*\n\n"
             
-            md_msg += "\n*(Files are securely stored in your **Files** tab)*\n\n"
-        
-        if res['stdout']:
-            out = res['stdout'][:1000] + ('...' if len(res['stdout'])>1000 else '')
-            md_msg += f"\n**Output Summary:**\n```text\n{out}\n```\n"
-            
-        if res['stderr']:
-            err = res['stderr'][:1000] + ('...' if len(res['stderr'])>1000 else '')
-            md_msg += f"\n**Error Detail:**\n```text\n{err}\n```\n"
+            if res.get('stdout'):
+                out = res['stdout'][:1000] + ('...' if len(res['stdout'])>1000 else '')
+                md_msg += f"\n**Output Summary:**\n```text\n{out}\n```\n"
+                
+            if res.get('stderr'):
+                err = res['stderr'][:1000] + ('...' if len(res['stderr'])>1000 else '')
+                md_msg += f"\n**Error Detail:**\n```text\n{err}\n```\n"
 
-        msg = CopilotMessage(
-            project_id=uuid.UUID(project_id), 
-            session_id=session_id, 
-            role="assistant", 
-            content=md_msg,
-            attachments=json.dumps(attachments) if attachments else None
-        )
-        db.add(msg)
-        db.commit()
+            msg = CopilotMessage(
+                project_id=uuid.UUID(project_id), 
+                session_id=session_id, 
+                role="assistant", 
+                content=md_msg,
+                attachments=json.dumps(attachments) if attachments else None
+            )
+            db.add(msg)
+            db.commit()
+            print(f"✅ [Sandbox Task] Message saved to chat, task completed", flush=True)
+            
+    except Exception as e:
+        print(f"❌ [Sandbox Task] Critical error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        
+        try:
+            with Session(engine) as db:
+                analysis = db.get(Analysis, uuid.UUID(analysis_id))
+                if analysis:
+                    analysis.status = "failed"
+                    db.commit()
+                
+                msg = CopilotMessage(
+                    project_id=uuid.UUID(project_id), 
+                    session_id=session_id, 
+                    role="assistant", 
+                    content=f"### ❌ Sandbox Analysis Failed\n\n**Error:** `{str(e)}`\n\nPlease check your code and try again."
+                )
+                db.add(msg)
+                db.commit()
+        except Exception as inner_e:
+            print(f"❌ [Sandbox Task] Failed to save error message: {inner_e}", flush=True)

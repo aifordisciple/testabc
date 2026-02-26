@@ -1,14 +1,14 @@
 'use client';
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
-import toast from 'hot-toast';
+import toast from 'react-hot-toast';
 
 interface CopilotPanelProps {
   projectId: string;
 }
 
 interface Attachment {
-  type: 'image' | 'table' | 'file';
+  type: 'image' | 'table' | 'pdf' | 'file';
   name: string;
   data?: string;
   preview?: string;
@@ -23,7 +23,7 @@ interface ChatMessage {
 }
 
 interface FullscreenPreview {
-  type: 'image' | 'table';
+  type: 'image' | 'table' | 'pdf';
   data: string;
   name: string;
 }
@@ -311,6 +311,37 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
             );
           }
 
+          if (att.type === 'pdf') {
+            return (
+              <div key={idx} className="bg-gray-900 rounded-xl p-4 border border-gray-700">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm text-gray-400 flex items-center gap-2">
+                    <span>📕</span> {att.name}
+                  </span>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => setFullscreenPreview({ type: 'pdf', data: att.data!, name: att.name })}
+                      className="text-blue-400 text-xs hover:underline flex items-center gap-1"
+                    >
+                      🔍 Preview
+                    </button>
+                    <button 
+                      onClick={() => att.data && downloadFile(att.data, att.name)}
+                      className="text-blue-400 text-xs hover:underline flex items-center gap-1"
+                    >
+                      ⬇️ Download
+                    </button>
+                  </div>
+                </div>
+                <div className="bg-gray-950 rounded-lg p-6 text-center">
+                  <div className="text-4xl mb-2">📕</div>
+                  <div className="text-sm text-gray-400">{att.name}</div>
+                  <div className="text-xs text-gray-500 mt-1">Click Preview to view or Download to save</div>
+                </div>
+              </div>
+            );
+          }
+
           return null;
         })}
       </div>
@@ -391,6 +422,16 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+          
+          {fullscreenPreview.type === 'pdf' && (
+            <div className="bg-gray-900 rounded-xl max-h-[85vh] overflow-hidden">
+              <iframe 
+                src={fullscreenPreview.data}
+                className="w-full h-[80vh] rounded-lg"
+                title={fullscreenPreview.name}
+              />
             </div>
           )}
         </div>
