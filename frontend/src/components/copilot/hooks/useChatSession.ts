@@ -25,7 +25,9 @@ export function useChatSession(projectId: string) {
 
   const handleNewSession = useCallback(() => {
     const newId = `chat-${Date.now()}`;
-    store.setSessions(projectId, [newId, ...sessions]);
+    // 修复: 增加 (sessions || []) 防御性编程，防止 undefined 导致崩溃
+    const safeSessions = sessions || [];
+    store.setSessions(projectId, [newId, ...safeSessions]);
     setCurrentSession(newId);
     store.setMessages(projectId, newId, []);
   }, [projectId, sessions, store, setCurrentSession]);
@@ -39,9 +41,14 @@ export function useChatSession(projectId: string) {
 
     try {
       await api.delete(`/ai/projects/${projectId}/chat/sessions/${sessionId}`);
-      const newSessions = sessions.filter((s) => s !== sessionId);
+      
+      // 修复: 安全地过滤本地 state，移除导致崩溃的 store.clearProject
+      const safeSessions = sessions || [];
+      const newSessions = safeSessions.filter((s) => s !== sessionId);
       store.setSessions(projectId, newSessions);
-      store.clearProject(projectId);
+      
+      // 删除了 store.clearProject(projectId);
+      
       if (currentSession === sessionId) {
         setCurrentSession('default');
       }
@@ -68,7 +75,7 @@ export function useChatSession(projectId: string) {
 
   return {
     currentSession,
-    sessions,
+    sessions: sessions || ['default'], // 兜底返回，防止 UI 渲染报错
     setCurrentSession,
     fetchSessions,
     handleNewSession,

@@ -230,6 +230,13 @@ const [isLoading, setIsLoading] = useState(false);
     }
   }, [sessions, currentSessionId]);
 
+  // Auto-create session when all sessions are deleted
+  useEffect(() => {
+    if (selectedProjectId && sessions.length === 0 && !currentSessionId && !createSessionMutation.isPending) {
+      createSessionMutation.mutate(locale === 'zh' ? '新对话' : 'New Chat');
+    }
+  }, [selectedProjectId, sessions.length, currentSessionId, createSessionMutation.isPending, locale]);
+
   // Scroll to bottom on new messages
   useEffect(() => {
     if (sessionMessages?.length || streamingContent) {
