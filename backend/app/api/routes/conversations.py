@@ -246,7 +246,7 @@ def add_message(
         created_at=message.created_at,
         response_mode=message.response_mode,
         response_data=json.loads(message.response_data) if message.response_data else None,
-        plan_data=json.loads(message.response_data) if message.response_data else None,
+        plan_data=message.response_data if message.response_data else None,
         files=json.loads(message.files) if message.files else None,
         attachments=json.loads(message.files) if message.files else None
     )
@@ -281,7 +281,7 @@ def get_messages(
             created_at=msg.created_at,
             response_mode=msg.response_mode,
             response_data=json.loads(msg.response_data) if msg.response_data else None,
-            plan_data=json.loads(msg.response_data) if msg.response_data else None,
+            plan_data=msg.response_data if msg.response_data else None,
             files=json.loads(msg.files) if msg.files else None,
             attachments=json.loads(msg.files) if msg.files else None
         )
@@ -367,7 +367,7 @@ def update_message(
         created_at=message.created_at,
         response_mode=message.response_mode,
         response_data=json.loads(message.response_data) if message.response_data else None,
-        plan_data=json.loads(message.response_data) if message.response_data else None,
+        plan_data=message.response_data if message.response_data else None,
         files=json.loads(message.files) if message.files else None,
         attachments=json.loads(message.files) if message.files else None
     )
