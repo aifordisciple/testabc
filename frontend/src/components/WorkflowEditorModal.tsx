@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import toast from 'react-hot-toast';
+import { toast } from '@/components/ui/Toast';
 import CodeEditor from './CodeEditor';
 import DynamicParamsForm from './DynamicParamsForm';
 import ChatPanel, { Message } from './ChatPanel';

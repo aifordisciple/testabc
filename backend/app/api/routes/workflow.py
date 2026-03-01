@@ -24,6 +24,37 @@ from app.services.workflow_service import workflow_service
 router = APIRouter()
 
 # =======================
+# Global Endpoints (no project_id)
+# =======================
+
+@router.get("/analyses", response_model=List[AnalysisPublic])
+def list_all_analyses(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+    limit: int = 100
+):
+    """List all analyses across all projects for current user"""
+    user_projects = session.exec(
+        select(Project.id).where(Project.owner_id == current_user.id)
+    ).all()
+    
+    if not user_projects:
+        return []
+    
+    analyses = session.exec(
+        select(Analysis)
+        .where(Analysis.project_id.in_(user_projects))
+        .order_by(Analysis.start_time.desc())
+        .limit(limit)
+    ).all()
+    
+    return analyses
+
+
+# =======================
+# Sample Sheet Management
+
+# =======================
 # Sample Sheet Management
 # =======================
 
@@ -376,3 +407,70 @@ def download_analysis_results(
     
     filename = f"results_{analysis.id}_download.zip"
     return FileResponse(zip_file_path, media_type="application/zip", filename=filename)
+
+@router.post("/analyses/{analysis_id}/stop")
+def stop_analysis(
+    analysis_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """停止正在运行或等待中的任务"""
+    analysis = session.get(Analysis, analysis_id)
+    if not analysis:
+        raise HTTPException(404, "Analysis not found")
+    
+    project = session.get(Project, analysis.project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(403, "Permission denied")
+    
+    if analysis.status not in ["pending", "running"]:
+        raise HTTPException(400, f"Cannot stop task with status '{analysis.status}'")
+    
+    if analysis.pid:
+        try:
+            import signal
+            os.kill(analysis.pid, signal.SIGTERM)
+            print(f"[Stop Analysis] Sent SIGTERM to PID {analysis.pid}", flush=True)
+        except ProcessLookupError:
+            print(f"[Stop Analysis] Process {analysis.pid} not found", flush=True)
+        except Exception as e:
+            print(f"[Stop Analysis] Error killing process: {e}", flush=True)
+    
+    analysis.status = "stopped"
+    from datetime import datetime
+    analysis.end_time = datetime.utcnow()
+    session.add(analysis)
+    session.commit()
+    
+    return {"status": "stopped", "message": "Task has been stopped"}
+
+@router.delete("/analyses/{analysis_id}")
+def delete_analysis(
+    analysis_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """删除任务记录及其工作目录"""
+    analysis = session.get(Analysis, analysis_id)
+    if not analysis:
+        raise HTTPException(404, "Analysis not found")
+    
+    project = session.get(Project, analysis.project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(403, "Permission denied")
+    
+    if analysis.status in ["pending", "running"]:
+        raise HTTPException(400, "Cannot delete a running task. Please stop it first.")
+    
+    work_dir = analysis.work_dir if analysis.work_dir else os.path.join(workflow_service.base_work_dir, str(analysis.id))
+    if os.path.exists(work_dir):
+        try:
+            shutil.rmtree(work_dir)
+            print(f"[Delete Analysis] Removed work directory: {work_dir}", flush=True)
+        except Exception as e:
+            print(f"[Delete Analysis] Warning: Could not remove work directory: {e}", flush=True)
+    
+    session.delete(analysis)
+    session.commit()
+    
+    return {"status": "deleted", "message": "Task has been deleted"}

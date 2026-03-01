@@ -81,7 +81,7 @@ def recover_password(email: str):
     """
     reset_token = create_access_token(subject=email, expires_delta=timedelta(minutes=15))
     
-    reset_link = f"http://localhost:3001/reset-password?token={reset_token}"
+    reset_link = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
     
     print("\n" + "="*60)
     print(f"📧 [MOCK EMAIL] To: {email}")

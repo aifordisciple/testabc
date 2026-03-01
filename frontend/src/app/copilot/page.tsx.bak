@@ -1,0 +1,367 @@
+'use client';
+
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
+import { useQuery } from '@tanstack/react-query';
+import ReactMarkdown from 'react-markdown';
+import { motion, AnimatePresence } from 'framer-motion';
+import { toast } from '@/components/ui/Toast';
+import { useCopilotStore } from '@/stores/copilotStore';
+import { useTheme } from '@/stores/themeStore';
+import { useLocale } from '@/stores/localeStore';
+import { useProjectStore } from '@/stores/projectStore';
+import { api } from '@/lib/api';
+import { 
+  FlaskConical, Check, ClipboardCheck, Play, Send, X, Download, 
+  Trash2, Plus, FolderOpen, FileText, Activity, Globe, Settings,
+  PanelLeftClose, PanelLeft, MessageSquare, Sparkles, Upload, Search
+} from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Badge } from '@/components/ui/badge';
+
+interface Project {
+  id: string;
+  name: string;
+  description: string;
+  created_at: string;
+}
+
+interface Analysis {
+  id: string;
+  workflow: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  start_time: string;
+}
+
+interface ProjectFile {
+  id: string;
+  filename: string;
+  size: number;
+}
+
+export default function CopilotPage() {
+  const router = useRouter();
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [streamingContent, setStreamingContent] = useState('');
+  const [streamingPlan, setStreamingPlan] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const prevMsgCountRef = useRef(0);
+  
+  const { resolvedTheme } = useTheme();
+  const { locale } = useLocale();
+  const { currentProject, setCurrentProject } = useProjectStore();
+  const isDark = resolvedTheme === 'dark';
+  
+  const store = useCopilotStore();
+  
+  const projectId = selectedProjectId || currentProject?.id || 'global';
+  const currentSession = store.getCurrentSession(projectId) || 'default';
+  const messages = store.getMessages(projectId, currentSession) || [];
+  const sessions = store.getSessions(projectId) || ['default'];
+  const hasMore = store.getHasMore(projectId, currentSession);
+  const isLoadingMore = store.getIsLoadingMore(projectId, currentSession);
+
+  const { data: projectList = [] } = useQuery<Project[]>({
+    queryKey: ['projects'],
+    queryFn: () => api.get<Project[]>('/files/projects'),
+    enabled: true
+  });
+
+  const { data: projectFiles = [] } = useQuery<ProjectFile[]>({
+    queryKey: ['project-files', selectedProjectId],
+    queryFn: () => selectedProjectId ? api.get<ProjectFile[]>(`/files/projects/${selectedProjectId}/files`) : Promise.resolve([]),
+    enabled: !!selectedProjectId
+  });
+
+  const { data: recentAnalyses = [] } = useQuery<Analysis[]>({
+    queryKey: ['project-analyses', selectedProjectId],
+    queryFn: () => selectedProjectId ? api.get<Analysis[]>(`/workflow/analyses?limit=5`) : Promise.resolve([]),
+    enabled: !!selectedProjectId,
+    refetchInterval: 10000
+  });
+
+  const runningTasks = (recentAnalyses || []).filter(a => a.status === 'running' || a.status === 'pending').length;
+
+  useEffect(() => {
+    if (projectList.length > 0 && !selectedProjectId) {
+      setSelectedProjectId(projectList[0].id);
+      setCurrentProject(projectList[0]);
+    }
+  }, [projectList, selectedProjectId, setCurrentProject]);
+
+  useEffect(() => {
+    if (messages.length > prevMsgCountRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      prevMsgCountRef.current = messages.length;
+    }
+  }, [messages.length]);
+
+  const handleSendStream = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || isLoading || !selectedProjectId) return;
+
+    const userMsg = input;
+    setInput('');
+    store.appendMessage(projectId, currentSession, { role: 'user', content: userMsg });
+    setIsLoading(true);
+    setStreamingContent('');
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${selectedProjectId}/chat/stream`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ message: userMsg, session_id: currentSession })
+        }
+      );
+
+      if (!response.ok) throw new Error(`HTTP error!`);
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let accumulatedContent = '';
+      let accumulatedPlan: string | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const text = decoder.decode(value, { stream: true });
+        const lines = text.split('\n');
+
+        for (const line of lines) {
+          if (line && line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              switch (data.type) {
+                case 'token':
+                  accumulatedContent += data.content;
+                  setStreamingContent(accumulatedContent);
+                  break;
+                case 'plan':
+                  accumulatedPlan = data.plan_data;
+                  setStreamingPlan(accumulatedPlan);
+                  break;
+                case 'done':
+                  store.appendMessage(projectId, currentSession, { role: 'assistant', content: accumulatedContent || 'Done.', plan_data: accumulatedPlan });
+                  setStreamingContent('');
+                  setStreamingPlan(null);
+                  break;
+                case 'error':
+                  toast.error(data.message);
+                  store.appendMessage(projectId, currentSession, { role: 'assistant', content: `Error: ${data.message}` });
+                  setStreamingContent('');
+                  break;
+              }
+            } catch {}
+          }
+        }
+      }
+    } catch (error) {
+      store.appendMessage(projectId, currentSession, { role: 'assistant', content: "Error: Connection failed." });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleConfirmPlan = async (planDataStr: string) => {
+    const toastId = toast.loading('Submitting task...');
+    try {
+      const token = localStorage.getItem('token');
+      const plan = JSON.parse(planDataStr);
+      const planType = plan.type || 'single';
+      let endpoint = `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${selectedProjectId}/chat/execute-plan`;
+      if (planType === 'multi') endpoint = `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${selectedProjectId}/chat/execute-chain`;
+      
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ plan_data: plan, session_id: currentSession })
+      });
+      
+      if (!res.ok) throw new Error('Failed');
+      toast.success('Task submitted!', { id: toastId });
+    } catch (e: any) {
+      toast.error(e.message, { id: toastId });
+    }
+  };
+
+  const renderPlanCard = (planDataStr: string) => {
+    let plan;
+    try { plan = JSON.parse(planDataStr); } catch { return null; }
+    return (
+      <div className="mt-4 bg-card border border-emerald-500/30 rounded-2xl p-4">
+        <div className="flex items-center gap-2 mb-2">
+          <ClipboardCheck className="w-5 h-5 text-emerald-500" />
+          <span className="font-bold">{plan.steps?.length ? `Multi-Step (${plan.steps.length})` : 'Analysis Strategy'}</span>
+        </div>
+        {plan.strategy && <p className="text-sm mb-3">{plan.strategy}</p>}
+        <Button onClick={() => handleConfirmPlan(planDataStr)} className="w-full gap-2">
+          <Play className="w-4 h-4" /> Execute
+        </Button>
+      </div>
+    );
+  };
+
+  const renderMessage = (msg: any, idx: number) => (
+    <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+      <div className={`max-w-[85%] rounded-2xl px-4 py-3 ${msg.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-card border'}`}>
+        <div className={`prose prose-sm ${isDark ? 'prose-invert' : ''}`}>
+          <ReactMarkdown>{msg.content}</ReactMarkdown>
+        </div>
+        {msg.plan_data && renderPlanCard(msg.plan_data)}
+      </div>
+    </div>
+  );
+
+  const quickActions = [
+    { id: 'upload', label: '上传文件', icon: <Upload className="w-4 h-4" />, action: () => router.push(`/dashboard/project/${selectedProjectId}?tab=files`) },
+    { id: 'task', label: '运行任务', icon: <Play className="w-4 h-4" />, action: () => setInput(locale === 'zh' ? '帮我运行一个RNA-seq分析' : 'Run RNA-seq') },
+    { id: 'search', label: '搜索数据', icon: <Search className="w-4 h-4" />, action: () => setInput('Search GEO') },
+  ];
+
+  return (
+    <div className="flex h-screen bg-background">
+      {/* Sidebar */}
+      {sidebarOpen && (
+        <motion.div initial={{ width: 0 }} animate={{ width: 300 }} exit={{ width: 0 }} className="border-r border-border bg-sidebar">
+          <div className="w-[300px] h-full flex flex-col">
+            <div className="p-4 border-b">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-primary to-blue-600 flex items-center justify-center">
+                  <Sparkles className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <span className="font-semibold text-sm">Bio-Copilot</span>
+                  <p className="text-[11px] text-muted-foreground">AI Bioinformatician</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-3 border-b">
+              <label className="text-xs font-medium text-muted-foreground mb-2 block">项目</label>
+              <select 
+                className="w-full bg-background border text-foreground text-sm rounded-lg px-3 py-2"
+                value={selectedProjectId || ''}
+                onChange={(e) => { const p = projectList.find(x => x.id === e.target.value); if (p) { setSelectedProjectId(p.id); setCurrentProject(p); }}}
+              >
+                {projectList.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+
+            {selectedProjectId && (
+              <div className="p-3 border-b">
+                <div className="grid grid-cols-3 gap-2">
+                  {quickActions.map(a => (
+                    <button key={a.id} onClick={a.action} className="flex flex-col items-center gap-1 p-2 rounded-lg border text-xs hover:bg-accent">
+                      {a.icon}
+                      <span>{a.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <ScrollArea className="flex-1 p-3">
+              <div className="space-y-1">
+                <button onClick={() => router.push('/dashboard')} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:bg-accent">
+                  <FolderOpen className="w-[18px]" /> 工作台
+                </button>
+                <button className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm bg-primary/15 text-primary">
+                  <MessageSquare className="w-[18px]" /> AI 对话
+                </button>
+                <button onClick={() => router.push('/dashboard?tab=tasks')} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:bg-accent">
+                  <Activity className="w-[18px]" /> 任务中心
+                </button>
+              </div>
+            </ScrollArea>
+
+            <div className="p-3 border-t">
+              <button onClick={() => router.push('/dashboard')} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:bg-accent">
+                <Settings className="w-[18px]" /> 设置
+              </button>
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* Main */}
+      <div className="flex-1 flex flex-col">
+        <div className="h-14 border-b bg-card/50 flex items-center justify-between px-4">
+          <div className="flex items-center gap-3">
+            <Button variant="ghost" size="icon" onClick={() => setSidebarOpen(!sidebarOpen)}>
+              {sidebarOpen ? <PanelLeftClose className="w-5 h-5" /> : <PanelLeft className="w-5 h-5" />}
+            </Button>
+            <h3 className="font-bold">Bio-Copilot</h3>
+            {selectedProjectId && <Badge variant="outline">{projectList.find(p => p.id === selectedProjectId)?.name}</Badge>}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => store.setMessages(projectId, `chat-${Date.now()}`, [])}>
+              <Plus className="w-4 h-4" /> 新建
+            </Button>
+          </div>
+        </div>
+
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+          {(messages || []).length === 0 && !streamingContent ? (
+            <div className="h-full flex flex-col items-center justify-center text-center opacity-50">
+              <span className="text-5xl mb-4">🧬</span>
+              <p className="text-lg font-medium">你好！我是 Bio-Copilot</p>
+              <p className="text-sm text-muted-foreground">我可以帮你分析数据、管理项目、运行工作流</p>
+            </div>
+          ) : (
+            <>
+              {(messages || []).map((msg, idx) => renderMessage(msg, idx))}
+              {streamingContent && (
+                <div className="flex justify-start">
+                  <div className="rounded-2xl px-4 py-3 bg-card border max-w-[85%]">
+                    <ReactMarkdown>{streamingContent}</ReactMarkdown>
+                    {streamingPlan && renderPlanCard(streamingPlan)}
+                  </div>
+                </div>
+              )}
+              {isLoading && !streamingContent && (
+                <div className="flex justify-start">
+                  <div className="bg-card border rounded-2xl px-4 py-3 flex items-center gap-2">
+                    <span className="relative flex h-3 w-3"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span><span className="relative inline-flex rounded-full h-3 w-3 bg-primary"></span></span>
+                    <span className="text-muted-foreground text-sm">Thinking...</span>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        <div className="p-4 bg-card border-t">
+          <form onSubmit={handleSendStream} className="relative max-w-4xl mx-auto flex items-end bg-background border rounded-xl overflow-hidden">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendStream(e); } }}
+              placeholder={selectedProjectId ? '输入消息...' : '请先选择项目'}
+              className="w-full bg-transparent text-foreground px-4 py-3 max-h-32 outline-none resize-none text-sm"
+              rows={1}
+              disabled={!selectedProjectId}
+            />
+            <div className="p-2">
+              <Button type="submit" disabled={!input.trim() || isLoading || !selectedProjectId} size="sm">
+                <Send className="w-4 h-4" />
+              </Button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}

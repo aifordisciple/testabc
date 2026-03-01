@@ -7,7 +7,7 @@ import SampleManager from '@/components/SampleManager';
 import AnalysisManager from '@/components/AnalysisManager';
 import ConfirmModal from '@/components/ConfirmModal'; // 👈
 import InputModal from '@/components/InputModal';     // 👈
-import toast from 'react-hot-toast';
+import { toast } from '@/components/ui/Toast';
 
 // ... 保持类型定义和 LinkProjectModal 不变 ...
 interface FileData {

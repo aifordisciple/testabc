@@ -1,3 +1,17 @@
+"""
+DEPRECATED: This module is deprecated and will be removed in a future version.
+
+The CopilotOrchestrator class has been superseded by the unified Agent system.
+Please use the Agent class from app.core.agent instead.
+
+Migration guide:
+- Use Agent.handle_request() instead of CopilotOrchestrator.analyze_request()
+- Use ConversationMessage model instead of CopilotMessage
+- Access the /copilot page as the single entry point
+
+This module is kept temporarily for backward compatibility.
+"""
+
 import os
 import json
 from typing import Dict, Any, List, Optional
@@ -6,6 +20,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.core.intent_parser import intent_parser, ParsedIntent
+from app.core.fast_path import fast_path_handler, FastPathResult
 from app.services.workflow_matcher import workflow_matcher, WorkflowMatch
 from app.core.llm import llm_client
 from app.models.user import User, Project, SampleSheet, Sample, File, ProjectFileLink, Analysis
@@ -91,6 +106,17 @@ class CopilotOrchestrator:
         print(f"🎬 [CopilotOrchestrator] Processing request for project {project_id}", flush=True)
         print(f"📝 User input: {user_input[:100]}...", flush=True)
         print(f"{'='*60}", flush=True)
+        
+        if fast_path_handler.can_handle(user_input):
+            print(f"⚡ [CopilotOrchestrator] Fast path detected", flush=True)
+            fast_result = fast_path_handler.handle(user_input, project_id, session)
+            if fast_result.handled:
+                print(f"⚡ [CopilotOrchestrator] Fast path handled successfully", flush=True)
+                return CopilotResponse(
+                    mode="fast_path",
+                    query_data=fast_result.query_data,
+                    explanation=fast_result.response
+                )
         
         try:
             project = session.get(Project, UUID(project_id))

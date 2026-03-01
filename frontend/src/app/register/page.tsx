@@ -3,6 +3,10 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Card, CardContent } from '@/components/ui/Card';
+import { Loader2, Sparkles } from 'lucide-react';
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -34,7 +38,7 @@ export default function RegisterPage() {
       }
 
       alert('注册成功！请登录');
-      router.push('/'); // 跳转回登录页
+      router.push('/');
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -43,73 +47,81 @@ export default function RegisterPage() {
   };
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-gray-950 text-white p-4">
-      <div className="w-full max-w-md space-y-8">
+    <main className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-primary/20 via-background to-background" />
+      
+      <div className="relative w-full max-w-md space-y-8">
         <div className="text-center">
-          <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 text-transparent bg-clip-text">
+          <div className="flex justify-center mb-4">
+            <div className="p-4 rounded-2xl bg-primary/20">
+              <Sparkles className="w-10 h-10 text-primary" />
+            </div>
+          </div>
+          <h1 className="text-3xl font-bold">
             Join Autonome
           </h1>
-          <p className="mt-2 text-gray-400 text-sm">Create your digital lab account</p>
-        </div>
-
-        <div className="bg-gray-900/50 border border-gray-800 p-8 rounded-xl shadow-2xl backdrop-blur-sm">
-          <form className="space-y-6" onSubmit={handleRegister}>
-            {error && (
-              <div className="bg-red-500/10 border border-red-500/50 rounded p-3 text-sm text-red-400 text-center">
-                {error}
-              </div>
-            )}
-
-            <div>
-              <label className="block text-sm font-medium text-gray-300">Email</label>
-              <input
-                type="email"
-                required
-                className="mt-2 block w-full rounded-md border-0 bg-gray-800 py-2.5 px-3 text-white ring-1 ring-inset ring-gray-700 focus:ring-2 focus:ring-blue-500 sm:text-sm"
-                value={formData.email}
-                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-300">Full Name</label>
-              <input
-                type="text"
-                required
-                className="mt-2 block w-full rounded-md border-0 bg-gray-800 py-2.5 px-3 text-white ring-1 ring-inset ring-gray-700 focus:ring-2 focus:ring-blue-500 sm:text-sm"
-                value={formData.full_name}
-                onChange={(e) => setFormData({ ...formData, full_name: e.target.value })}
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-300">Password</label>
-              <input
-                type="password"
-                required
-                minLength={8}
-                className="mt-2 block w-full rounded-md border-0 bg-gray-800 py-2.5 px-3 text-white ring-1 ring-inset ring-gray-700 focus:ring-2 focus:ring-blue-500 sm:text-sm"
-                value={formData.password}
-                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="flex w-full justify-center rounded-md bg-emerald-600 px-3 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 disabled:opacity-50 transition-all"
-            >
-              {loading ? 'Creating Account...' : 'Sign Up'}
-            </button>
-          </form>
-
-          <p className="mt-6 text-center text-sm text-gray-500">
-            Already have an account?{' '}
-            <Link href="/" className="font-semibold text-blue-400 hover:text-blue-300">
-              Sign in
-            </Link>
+          <p className="mt-2 text-muted-foreground text-sm">
+            创建你的数字实验室账号
           </p>
         </div>
+
+        <Card className="relative">
+          <CardContent className="p-8">
+            <form className="space-y-5" onSubmit={handleRegister}>
+              {error && (
+                <div className="bg-destructive/10 border border-destructive/30 rounded-lg p-3 text-sm text-destructive text-center">
+                  {error}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium mb-2">Email</label>
+                <Input
+                  type="email"
+                  placeholder="researcher@lab.com"
+                  value={formData.email}
+                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2">Full Name</label>
+                <Input
+                  type="text"
+                  placeholder="Your name"
+                  value={formData.full_name}
+                  onChange={(e) => setFormData({ ...formData, full_name: e.target.value })}
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2">Password</label>
+                <Input
+                  type="password"
+                  minLength={8}
+                  placeholder="Min 8 characters"
+                  value={formData.password}
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                  required
+                />
+              </div>
+
+              <Button type="submit" disabled={loading} className="w-full h-11">
+                {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Create Account
+              </Button>
+            </form>
+
+            <p className="mt-6 text-center text-sm text-muted-foreground">
+              已有账号？{' '}
+              <Link href="/" className="text-primary font-medium hover:underline">
+                登录
+              </Link>
+            </p>
+          </CardContent>
+        </Card>
       </div>
     </main>
   );

@@ -92,13 +92,16 @@ class KnowledgeService:
         """混合本地检索：精准文本匹配 + 向量语义检索"""
         query_str = query.strip()
         
+        # Sanitize special LIKE characters to prevent injection
+        sanitized_query = query_str.replace('%', r'\%').replace('_', r'\_')
+        
         # 1. 优先进行传统关系型数据库的文本精确/模糊匹配 (特别擅长抓取 GSE 编号或精确词汇)
         text_matches = db.exec(
             select(PublicDataset)
             .where(
                 or_(
-                    PublicDataset.accession.ilike(f"%{query_str}%"),
-                    PublicDataset.title.ilike(f"%{query_str}%")
+                    PublicDataset.accession.ilike(f"%{sanitized_query}%"),
+                    PublicDataset.title.ilike(f"%{sanitized_query}%")
                 )
             )
             .limit(top_k)

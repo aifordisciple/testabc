@@ -2,9 +2,19 @@
 
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import toast from 'react-hot-toast';
+import { toast } from '@/components/ui/Toast';
 import WorkflowEditorModal from '@/components/WorkflowEditorModal';
 import ConfirmModal from '@/components/ConfirmModal';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Card, CardContent } from '@/components/ui/Card';
+import { 
+  Search, Plus, Pencil, Trash2, FlaskConical, Wrench, 
+  ChevronRight, Tag, Calendar, Code, Layers, X, Sparkles
+} from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { useLocale } from '@/stores/localeStore';
 
 interface WorkflowTemplate {
   id: string;
@@ -25,15 +35,42 @@ interface WorkflowManagerProps {
     onBack?: () => void;
 }
 
+const translations = {
+  zh: {
+    title: '工作流管理',
+    subtitle: '管理分析流程和自定义工具',
+    createWorkflow: '创建工作流',
+    createTool: '创建工具',
+    searchPlaceholder: '搜索工作流...',
+    noWorkflows: '暂无工作流',
+    deleteConfirm: '确定删除此工作流吗？这可能会破坏现有历史记录。',
+    deleted: '删除成功',
+    lastUpdate: '最后更新',
+  },
+  en: {
+    title: 'Workflow Manager',
+    subtitle: 'Manage pipelines and custom tools',
+    createWorkflow: 'New Workflow',
+    createTool: 'New Tool',
+    searchPlaceholder: 'Search workflows...',
+    noWorkflows: 'No workflows yet',
+    deleteConfirm: 'Delete this workflow? This might break existing history.',
+    deleted: 'Deleted successfully',
+    lastUpdate: 'Last updated',
+  }
+};
+
 export default function WorkflowManager({ onBack }: WorkflowManagerProps) {
   const queryClient = useQueryClient();
+  const { locale } = useLocale();
+  const t = translations[locale];
   
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [editingWorkflow, setEditingWorkflow] = useState<WorkflowTemplate | undefined>(undefined);
   const [createType, setCreateType] = useState<'PIPELINE' | 'TOOL'>('PIPELINE');
+  const [searchQuery, setSearchQuery] = useState('');
   const [confirmModal, setConfirmModal] = useState<{isOpen: boolean; title: string; message: string; action: () => void;}>({ isOpen: false, title: '', message: '', action: () => {} });
 
-  // --- React Query: 抓取工作流 ---
   const { data: workflows = [], isLoading } = useQuery<WorkflowTemplate[]>({
     queryKey: ['workflows'],
     queryFn: async () => {
@@ -46,7 +83,6 @@ export default function WorkflowManager({ onBack }: WorkflowManagerProps) {
     }
   });
 
-  // --- React Query: 删除工作流 ---
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => {
         const token = localStorage.getItem('token');
@@ -57,7 +93,7 @@ export default function WorkflowManager({ onBack }: WorkflowManagerProps) {
         if (!res.ok) throw new Error("Delete failed");
     },
     onSuccess: () => {
-        toast.success("Deleted successfully");
+        toast.success(t.deleted);
         queryClient.invalidateQueries({ queryKey: ['workflows'] });
     },
     onError: () => toast.error("Network error")
@@ -77,77 +113,147 @@ export default function WorkflowManager({ onBack }: WorkflowManagerProps) {
   const handleDeleteClick = (wf: WorkflowTemplate) => {
     setConfirmModal({
       isOpen: true,
-      title: "Delete Workflow",
-      message: `Delete "${wf.name}"? This might break existing history.`,
+      title: locale === 'zh' ? '删除工作流' : 'Delete Workflow',
+      message: `${t.deleteConfirm} "${wf.name}"`,
       action: () => deleteMutation.mutate(wf.id)
     });
   };
 
-  const groupedWorkflows = workflows.reduce((acc, wf) => {
+  const filteredWorkflows = workflows.filter(wf => 
+    wf.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    wf.category?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    wf.description?.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  const groupedWorkflows = filteredWorkflows.reduce((acc, wf) => {
     const key = wf.category || 'Uncategorized';
     if (!acc[key]) acc[key] = [];
     acc[key].push(wf);
     return acc;
   }, {} as Record<string, WorkflowTemplate[]>);
 
-  if (isLoading) return <div className="h-full flex items-center justify-center text-gray-500 animate-pulse">Loading Workflows...</div>;
+  const getTypeIcon = (type: string) => {
+    switch (type) {
+      case 'TOOL': return <Wrench className="w-3.5 h-3.5" />;
+      case 'MODULE': return <Code className="w-3.5 h-3.5" />;
+      default: return <FlaskConical className="w-3.5 h-3.5" />;
+    }
+  };
+
+  const getTypeColor = (type: string) => {
+    switch (type) {
+      case 'TOOL': return 'bg-orange-500/20 text-orange-400 border-orange-500/30';
+      case 'MODULE': return 'bg-blue-500/20 text-blue-400 border-blue-500/30';
+      default: return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30';
+    }
+  };
 
   return (
-    <div className="h-full flex flex-col bg-gray-950 text-white overflow-hidden">
+    <div className="h-full flex flex-col bg-background text-foreground overflow-hidden">
       {/* Header */}
-      <div className="px-8 py-6 border-b border-gray-800 bg-gray-900/30 flex-shrink-0">
-        <div className="flex justify-between items-center">
+      <div className="px-6 py-5 border-b border-border bg-card/50 flex-shrink-0">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
           <div className="flex items-center gap-3">
             {onBack && (
-                <button onClick={onBack} className="text-gray-500 hover:text-white transition-colors">
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                </button>
+                <Button variant="ghost" size="icon-sm" onClick={onBack}>
+                    <ChevronRight className="w-4 h-4 rotate-180" />
+                </Button>
             )}
             <div>
-                <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">Workflow & Tools</h1>
-                <p className="text-gray-400 text-xs mt-1">Manage pipelines and scripts</p>
+                <h1 className="text-2xl font-bold flex items-center gap-2">
+                  <Sparkles className="w-6 h-6 text-primary" />
+                  {t.title}
+                </h1>
+                <p className="text-muted-foreground text-sm mt-1">{t.subtitle}</p>
             </div>
           </div>
-          <div className="flex gap-3">
-            <button onClick={() => handleCreate('TOOL')} className="bg-orange-600 hover:bg-orange-500 text-white px-4 py-2 rounded-lg font-medium shadow-lg shadow-orange-900/20 text-sm">+ Tool</button>
-            <button onClick={() => handleCreate('PIPELINE')} className="bg-purple-600 hover:bg-purple-500 text-white px-4 py-2 rounded-lg font-medium shadow-lg shadow-purple-900/20 text-sm">+ Workflow</button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" onClick={() => handleCreate('TOOL')} className="gap-2">
+              <Wrench className="w-4 h-4" />
+              {t.createTool}
+            </Button>
+            <Button size="sm" onClick={() => handleCreate('PIPELINE')} className="gap-2">
+              <Plus className="w-4 h-4" />
+              {t.createWorkflow}
+            </Button>
           </div>
+        </div>
+        
+        {/* Search */}
+        <div className="mt-4 relative max-w-md">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <Input
+            type="text"
+            placeholder={t.searchPlaceholder}
+            className="w-full pl-9"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
         </div>
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-8">
-        <div className="space-y-12">
-          {Object.entries(groupedWorkflows).map(([category, items]) => (
-            <div key={category}>
-              <h2 className="text-lg font-bold text-gray-300 mb-6 flex items-center gap-3">
-                <span className="w-2 h-2 bg-purple-500 rounded-full shadow-[0_0_10px_rgba(168,85,247,0.5)]"></span>
-                {category}
-              </h2>
-              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-                {items.map(wf => (
-                  <div key={wf.id} className="bg-gray-900 border border-gray-800 rounded-xl p-5 hover:border-purple-500/30 hover:bg-gray-800/50 transition-all group relative overflow-hidden">
-                    <div className="absolute top-0 right-0 p-3">
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
-                            wf.workflow_type === 'MODULE' ? 'text-blue-400 border-blue-900 bg-blue-900/10' : 
-                            wf.workflow_type === 'TOOL' ? 'text-orange-400 border-orange-900 bg-orange-900/10' : 'text-emerald-400 border-emerald-900 bg-emerald-900/10'
-                        }`}>{wf.workflow_type}</span>
-                    </div>
-                    <h3 className="font-bold text-base mb-1 text-gray-100">{wf.name}</h3>
-                    <p className="text-gray-500 text-xs mb-4 line-clamp-2 h-8">{wf.description || "No description."}</p>
-                    <div className="flex justify-between items-end border-t border-gray-800/50 pt-3">
-                        <div className="text-[10px] text-gray-600 font-mono">{new Date(wf.updated_at).toLocaleDateString()}</div>
-                        <div className="flex gap-2">
-                            <button onClick={() => handleEdit(wf)} className="text-gray-400 hover:text-white"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg></button>
-                            <button onClick={() => handleDeleteClick(wf)} className="text-gray-600 hover:text-red-400"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+      <div className="flex-1 overflow-y-auto p-6">
+        {isLoading ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {[1, 2, 3, 4, 5, 6].map(i => (
+              <Skeleton key={i} className="h-40 rounded-xl" />
+            ))}
+          </div>
+        ) : filteredWorkflows.length === 0 ? (
+          <div className="text-center py-16">
+            <FlaskConical className="w-16 h-16 mx-auto text-muted-foreground/30 mb-4" />
+            <p className="text-muted-foreground">{t.noWorkflows}</p>
+            <Button onClick={() => handleCreate('PIPELINE')} className="mt-4 gap-2">
+              <Plus className="w-4 h-4" />
+              {t.createWorkflow}
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-8">
+            {Object.entries(groupedWorkflows).map(([category, items]) => (
+              <div key={category}>
+                <h2 className="text-sm font-semibold text-muted-foreground mb-4 flex items-center gap-2">
+                  <Tag className="w-4 h-4" />
+                  {category}
+                  <span className="text-xs bg-muted px-2 py-0.5 rounded-full">{items.length}</span>
+                </h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {items.map(wf => (
+                    <Card key={wf.id} hoverable className="group relative overflow-hidden">
+                      <div className="absolute top-0 right-0 p-3">
+                        <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded border flex items-center gap-1.5", getTypeColor(wf.workflow_type))}>
+                          {getTypeIcon(wf.workflow_type)}
+                          {wf.workflow_type}
+                        </span>
+                      </div>
+                      <CardContent className="p-5">
+                        <h3 className="font-bold text-base mb-2 pr-16">{wf.name}</h3>
+                        <p className="text-muted-foreground text-sm line-clamp-2 mb-4 min-h-[40px]">
+                          {wf.description || (locale === 'zh' ? '暂无描述' : 'No description')}
+                        </p>
+                        <div className="flex items-center justify-between pt-3 border-t border-border">
+                          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                            <Calendar className="w-3.5 h-3.5" />
+                            {new Date(wf.updated_at).toLocaleDateString()}
+                          </div>
+                          <div className="flex gap-1">
+                            <Button variant="ghost" size="icon-sm" onClick={() => handleEdit(wf)} className="opacity-0 group-hover:opacity-100 transition-opacity">
+                              <Pencil className="w-4 h-4" />
+                            </Button>
+                            <Button variant="ghost" size="icon-sm" onClick={() => handleDeleteClick(wf)} className="opacity-0 group-hover:opacity-100 transition-opacity text-destructive hover:text-destructive">
+                              <Trash2 className="w-4 h-4" />
+                            </Button>
+                          </div>
                         </div>
-                    </div>
-                  </div>
-                ))}
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {isEditorOpen && (
@@ -158,7 +264,13 @@ export default function WorkflowManager({ onBack }: WorkflowManagerProps) {
               onSave={() => queryClient.invalidateQueries({ queryKey: ['workflows'] })} 
           />
       )}
-      <ConfirmModal isOpen={confirmModal.isOpen} title={confirmModal.title} message={confirmModal.message} onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))} onConfirm={() => { confirmModal.action(); setConfirmModal(prev => ({ ...prev, isOpen: false })); }} />
+      <ConfirmModal 
+        isOpen={confirmModal.isOpen} 
+        title={confirmModal.title} 
+        message={confirmModal.message} 
+        onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))} 
+        onConfirm={() => { confirmModal.action(); setConfirmModal(prev => ({ ...prev, isOpen: false })); }} 
+      />
     </div>
   );
 }

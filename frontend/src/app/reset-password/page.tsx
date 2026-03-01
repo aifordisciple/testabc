@@ -1,8 +1,12 @@
 'use client';
 import { useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Card, CardContent } from '@/components/ui/Card';
+import { Loader2, Sparkles, ArrowLeft, Lock } from 'lucide-react';
 
-// 必须把使用 useSearchParams 的组件包在 Suspense 里
 function ResetForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -10,11 +14,17 @@ function ResetForm() {
 
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState(false);
 
   const handleReset = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!token) return alert('Token missing');
+    if (!token) {
+      setError('Token missing');
+      return;
+    }
     setLoading(true);
+    setError('');
 
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
@@ -25,51 +35,105 @@ function ResetForm() {
       });
 
       if (res.ok) {
-        alert('密码重置成功！请使用新密码登录。');
-        router.push('/');
+        setSuccess(true);
       } else {
-        alert('重置失败，链接可能已过期。');
+        setError('重置失败，链接可能已过期');
       }
     } catch (e) {
-      alert('网络错误');
+      setError('网络错误');
     } finally {
       setLoading(false);
     }
   };
 
+  if (success) {
+    return (
+      <Card className="relative w-full max-w-md">
+        <CardContent className="p-8 text-center">
+          <div className="flex justify-center mb-4">
+            <div className="p-4 rounded-full bg-emerald-500/20">
+              <Lock className="w-10 h-10 text-emerald-500" />
+            </div>
+          </div>
+          <h2 className="text-2xl font-bold mb-2">Password Reset!</h2>
+          <p className="text-muted-foreground mb-6">
+            密码重置成功，请使用新密码登录
+          </p>
+          <Button onClick={() => router.push('/')} className="gap-2">
+            <ArrowLeft className="w-4 h-4" />
+            立即登录
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
+
   return (
-    <div className="w-full max-w-md bg-gray-900 border border-gray-800 p-8 rounded-xl">
-      <h1 className="text-2xl font-bold mb-6">Set New Password</h1>
-      <form onSubmit={handleReset} className="space-y-6">
-        <div>
-          <label className="block text-sm font-medium text-gray-300">New Password</label>
-          <input
-            type="password"
-            required
-            minLength={8}
-            className="mt-2 block w-full rounded-md bg-gray-800 border-0 py-2.5 px-3 text-white ring-1 ring-inset ring-gray-700 focus:ring-2 focus:ring-blue-500"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
+    <Card className="relative w-full max-w-md">
+      <CardContent className="p-8">
+        <h1 className="text-2xl font-bold mb-6">Set New Password</h1>
+        <form onSubmit={handleReset} className="space-y-6">
+          {error && (
+            <div className="bg-destructive/10 border border-destructive/30 rounded-lg p-3 text-sm text-destructive text-center">
+              {error}
+            </div>
+          )}
+          <div>
+            <label className="block text-sm font-medium mb-2">New Password</label>
+            <Input
+              type="password"
+              minLength={8}
+              placeholder="Min 8 characters"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </div>
+          <Button type="submit" disabled={loading} className="w-full h-11">
+            {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Reset Password
+          </Button>
+        </form>
+        <div className="mt-6 text-center">
+          <Link href="/" className="text-sm text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-2">
+            <ArrowLeft className="w-4 h-4" />
+            Back to Login
+          </Link>
         </div>
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full rounded-md bg-emerald-600 px-3 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
-        >
-          {loading ? 'Resetting...' : 'Confirm New Password'}
-        </button>
-      </form>
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 
 export default function ResetPasswordPage() {
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-gray-950 text-white p-4">
-      <Suspense fallback={<div>Loading...</div>}>
-        <ResetForm />
-      </Suspense>
+    <main className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-primary/20 via-background to-background" />
+      
+      <div className="relative w-full max-w-md space-y-8">
+        <div className="text-center">
+          <div className="flex justify-center mb-4">
+            <div className="p-4 rounded-2xl bg-primary/20">
+              <Sparkles className="w-10 h-10 text-primary" />
+            </div>
+          </div>
+          <h1 className="text-2xl font-bold">Autonome</h1>
+          <p className="mt-2 text-muted-foreground text-sm">
+            Reset your password
+          </p>
+        </div>
+
+        <Suspense fallback={
+          <Card className="relative w-full max-w-md">
+            <CardContent className="p-8 text-center">
+              <Loader2 className="w-8 h-8 animate-spin mx-auto text-primary" />
+              <p className="mt-4 text-muted-foreground">Loading...</p>
+            </CardContent>
+          </Card>
+        }>
+          <ResetForm />
+        </Suspense>
+      </div>
     </main>
   );
 }

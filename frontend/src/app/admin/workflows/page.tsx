@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import toast from 'react-hot-toast';
+import { toast } from '@/components/ui/Toast';
 import WorkflowEditorModal from '@/components/WorkflowEditorModal';
 import ConfirmModal from '@/components/ConfirmModal';
 

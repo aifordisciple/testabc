@@ -1,6 +1,6 @@
 'use client';
 import { useState } from 'react';
-import toast from 'react-hot-toast';
+import { toast } from '@/components/ui/Toast';
 
 interface UploadModalProps {
   projectId: string;

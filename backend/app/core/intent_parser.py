@@ -89,12 +89,14 @@ class IntentParser:
     }
     
     def __init__(self):
-        self.base_url = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")
-        self.api_key = os.getenv("LLM_API_KEY", "ollama")
-        self.model = os.getenv("LLM_MODEL", "qwen2.5-coder:32b")
+        # Use unified llm_client singleton
+        from app.core.llm import llm_client
         
-        self.raw_client = OpenAI(base_url=self.base_url, api_key=self.api_key)
-        self.client = instructor.from_openai(self.raw_client, mode=instructor.Mode.JSON)
+        self.client = llm_client.client
+        self.raw_client = llm_client.raw_client
+        self.model = llm_client.model
+        self.base_url = llm_client.base_url
+        self.api_key = llm_client.api_key
         
         print(f"🧠 [IntentParser] Initialized with model: {self.model}", flush=True)
     

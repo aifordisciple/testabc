@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import UploadModal from '@/components/UploadModal';
@@ -9,7 +9,16 @@ import AnalysisManager from '@/components/AnalysisManager';
 import CopilotPanel from '@/components/CopilotPanel'; 
 import ConfirmModal from '@/components/ConfirmModal';
 import InputModal from '@/components/InputModal';
-import toast from 'react-hot-toast';
+import { toast } from '@/components/ui/Toast';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Card, CardContent } from '@/components/ui/Card';
+import { AnimatedTabsUnderline } from '@/components/ui/animated-tabs';
+import { 
+  X, Folder, FileText, Download, Share2, Pencil, Link2Off, Trash2, 
+  FolderPlus, Upload, ChevronRight, Bot, Maximize2, Minimize2
+} from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 interface FileData { id: string; filename: string; size: number; uploaded_at: string; content_type: string; is_directory: boolean; }
 interface ProjectDetail { id: string; name: string; description: string; }
@@ -22,20 +31,23 @@ const fetchAPI = async (endpoint: string) => {
     return res.json();
 };
 
-function LinkProjectModal({ fileId, currentProjectId, onClose }: any) {
-  const queryClient = useQueryClient();
-  const [selectedProjectId, setSelectedProjectId] = useState('');
+interface LinkProjectModalProps {
+  fileId: string;
+  currentProjectId: string;
+  onClose: () => void;
+}
 
+function LinkProjectModal({ fileId, currentProjectId, onClose }: LinkProjectModalProps) {
+  const queryClient = useQueryClient();
+  
   const { data: projects = [] } = useQuery<ProjectDetail[]>({
     queryKey: ['projects'],
     queryFn: () => fetchAPI('/files/projects'),
   });
   
   const availableProjects = projects.filter(p => p.id !== currentProjectId);
-
-  useEffect(() => {
-      if (availableProjects.length > 0 && !selectedProjectId) setSelectedProjectId(availableProjects[0].id);
-  }, [availableProjects, selectedProjectId]);
+  const firstProjectId = availableProjects[0]?.id || '';
+  const [selectedProjectId, setSelectedProjectId] = useState(firstProjectId);
 
   const linkMutation = useMutation({
       mutationFn: async () => {
@@ -53,25 +65,36 @@ function LinkProjectModal({ fileId, currentProjectId, onClose }: any) {
           queryClient.invalidateQueries({ queryKey: ['files'] });
           onClose();
       },
-      onError: (err: any) => toast.error(err.status === 'already_linked' ? 'Already linked' : `Failed: ${err.detail || 'Network error'}`)
+      onError: (err: { status?: string; detail?: string }) => toast.error(err.status === 'already_linked' ? 'Already linked' : `Failed: ${err.detail || 'Network error'}`)
   });
 
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[200]">
-      <div className="bg-gray-900 p-6 rounded-xl border border-gray-700 w-96 shadow-2xl">
-        <h3 className="text-xl font-bold text-white mb-4">Share to another Project</h3>
-        {availableProjects.length === 0 ? <div className="text-yellow-500 text-sm mb-4">No other projects available.</div> : (
-          <select className="w-full bg-gray-800 border border-gray-700 rounded-md p-2 text-white mb-6 outline-none focus:border-blue-500" value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)}>
-            {availableProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-        )}
-        <div className="flex justify-end gap-3">
-          <button onClick={onClose} className="text-gray-400 hover:text-white text-sm">Cancel</button>
-          <button onClick={() => linkMutation.mutate()} disabled={linkMutation.isPending || availableProjects.length === 0} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50 transition-colors">
+      <Card className="w-full max-w-md mx-4">
+        <CardContent className="p-6">
+          <h3 className="text-lg font-bold mb-4">Share to another Project</h3>
+          {availableProjects.length === 0 ? (
+            <div className="text-yellow-500 text-sm mb-4">No other projects available.</div>
+          ) : (
+            <select 
+              className="w-full bg-background border border-input rounded-md p-3 mb-6 outline-none focus:border-primary"
+              value={selectedProjectId} 
+              onChange={(e) => setSelectedProjectId(e.target.value)}
+            >
+              {availableProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          )}
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button 
+              onClick={() => linkMutation.mutate()} 
+              disabled={linkMutation.isPending || availableProjects.length === 0}
+            >
               {linkMutation.isPending ? 'Linking...' : 'Confirm'}
-          </button>
-        </div>
-      </div>
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -81,7 +104,10 @@ interface ProjectWorkspaceProps { projectId: string; onBack?: () => void; isActi
 export default function ProjectWorkspace({ projectId, onBack, isActive = true }: ProjectWorkspaceProps) {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<'files' | 'samples' | 'workflow' | 'copilot'>('files');
+  const [fullscreen, setFullscreen] = useState(false);
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+  const [batchMode, setBatchMode] = useState(false);
   
   const [showUpload, setShowUpload] = useState(false);
   const [linkTargetFileId, setLinkTargetFileId] = useState<string | null>(null);
@@ -112,7 +138,7 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
   });
 
   const actionMutation = useMutation({
-      mutationFn: async ({ url, method, body }: { url: string, method: string, body?: any }) => {
+      mutationFn: async ({ url, method, body }: { url: string; method: string; body?: unknown }) => {
           const token = localStorage.getItem('token');
           const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}${url}`, {
               method,
@@ -135,28 +161,108 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
       const baseUrl = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/api\/v1\/?$/, '');
       window.open(`${baseUrl}${data.download_url}`, '_blank');
       toast.dismiss(loadingToast);
-    } catch (e) { toast.error('Request failed', { id: loadingToast }); }
+    } catch { toast.error('Request failed', { id: loadingToast }); }
   };
 
-  const openCreateFolderModal = () => setInputModal({ isOpen: true, title: "New Folder Name", defaultValue: "", onSubmit: (name) => {
-      actionMutation.mutate({ url: `/files/projects/${projectId}/folders?folder_name=${encodeURIComponent(name)}${currentFolderId ? `&parent_id=${currentFolderId}` : ''}`, method: 'POST' });
+  const toggleFileSelection = (fileId: string) => {
+    setSelectedFiles(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(fileId)) {
+        newSet.delete(fileId);
+      } else {
+        newSet.add(fileId);
+      }
+      return newSet;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedFiles.size === files.length) {
+      setSelectedFiles(new Set());
+    } else {
+      setSelectedFiles(new Set(files.map(f => f.id)));
+    }
+  };
+
+  const handleBatchDelete = () => {
+    if (selectedFiles.size === 0) return;
+    setConfirmModal({
+      isOpen: true,
+      title: "Delete Selected Files",
+      message: `Are you sure you want to permanently delete ${selectedFiles.size} selected item(s)? This action cannot be undone.`,
+      action: async () => {
+        const deletePromises = Array.from(selectedFiles).map(id => 
+          fetch(`${process.env.NEXT_PUBLIC_API_URL}/files/files/${id}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+          })
+        );
+        await Promise.all(deletePromises);
+        toast.success(`${selectedFiles.size} files deleted`);
+        setSelectedFiles(new Set());
+        setBatchMode(false);
+        queryClient.invalidateQueries({ queryKey: ['files', projectId] });
+      }
+    });
+  };
+
+  const handleBatchDownload = async () => {
+    if (selectedFiles.size === 0) return;
+    const loadingToast = toast.loading(`Preparing ${selectedFiles.size} files for download...`);
+    try {
+      const filesToDownload = files.filter(f => selectedFiles.has(f.id) && !f.is_directory);
+      for (const file of filesToDownload) {
+        await handleDownload(file.id);
+      }
+      toast.dismiss(loadingToast);
+      toast.success(`Download started for ${filesToDownload.length} files`);
+    } catch {
+      toast.error('Download failed', { id: loadingToast });
+    }
+  };
+
+  const openCreateFolderModal = () => setInputModal({ 
+    isOpen: true, 
+    title: "New Folder", 
+    defaultValue: "", 
+    onSubmit: (name) => {
+      actionMutation.mutate({ 
+        url: `/files/projects/${projectId}/folders?folder_name=${encodeURIComponent(name)}${currentFolderId ? `&parent_id=${currentFolderId}` : ''}`, 
+        method: 'POST' 
+      });
       toast.success("Folder created");
-  }});
+    }
+  });
   
-  const openRenameModal = (fileId: string, currentName: string) => setInputModal({ isOpen: true, title: "Rename File/Folder", defaultValue: currentName, onSubmit: (newName) => {
+  const openRenameModal = (fileId: string, currentName: string) => setInputModal({ 
+    isOpen: true, 
+    title: "Rename", 
+    defaultValue: currentName, 
+    onSubmit: (newName) => {
       actionMutation.mutate({ url: `/files/files/${fileId}/rename`, method: 'PATCH', body: { new_name: newName } });
       toast.success("Renamed");
-  }});
+    }
+  });
 
-  const openRemoveLinkModal = (fileId: string) => setConfirmModal({ isOpen: true, title: "Remove from Project", message: "Remove file from this project view? (File remains in storage)", action: () => {
+  const openRemoveLinkModal = (fileId: string) => setConfirmModal({ 
+    isOpen: true, 
+    title: "Remove from Project", 
+    message: "Remove file from this project view? (File remains in storage)", 
+    action: () => {
       actionMutation.mutate({ url: `/files/projects/${projectId}/files/${fileId}`, method: 'DELETE' });
       toast.success("Removed from project");
-  }});
+    }
+  });
 
-  const openHardDeleteModal = (fileId: string, isDir: boolean) => setConfirmModal({ isOpen: true, title: isDir ? "Delete Folder" : "Delete File", message: isDir ? "⚠️ Permanently delete this folder? Ensure it is empty." : "⚠️ Permanently delete this file! Cannot be undone!", action: () => {
+  const openHardDeleteModal = (fileId: string, isDir: boolean) => setConfirmModal({ 
+    isOpen: true, 
+    title: isDir ? "Delete Folder" : "Delete File", 
+    message: isDir ? "Permanently delete this folder?" : "Permanently delete this file! Cannot be undone!", 
+    action: () => {
       actionMutation.mutate({ url: `/files/files/${fileId}`, method: 'DELETE' });
       toast.success('Permanently deleted');
-  }});
+    }
+  });
 
   const formatSize = (bytes: number) => {
     if (bytes === 0) return '-';
@@ -165,75 +271,194 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
+  const tabs = [
+    { id: 'files', label: 'Files' },
+    { id: 'samples', label: 'Samples' },
+    { id: 'workflow', label: 'Workflow' },
+    { id: 'copilot', label: 'Bio-Copilot' },
+  ];
+
+  const displayTabs = tabs;
+
   return (
-    <div className="h-full flex flex-col bg-gray-950 text-white overflow-hidden">
-      <div className="px-8 py-6 border-b border-gray-800 bg-gray-900/30 flex-shrink-0">
-        <div className="flex justify-between items-end">
-          <div>
-            <div className="flex items-center gap-2 mb-2">
+    <div className="h-full flex flex-col bg-background text-foreground overflow-hidden">
+      {/* Header */}
+      <div className="px-3 md:px-6 py-3 md:py-5 border-b border-border bg-card/50 flex-shrink-0">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-2 md:gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 mb-1 md:mb-2">
                 {onBack && (
-                    <button onClick={onBack} className="text-gray-500 hover:text-white transition-colors p-1 rounded hover:bg-gray-800" title="Close Tab">
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                    </button>
+                    <Button variant="ghost" size="icon-sm" className="touch-target-min" onClick={onBack}>
+                        <X className="w-4 h-4" />
+                    </Button>
                 )}
-                <h2 className="text-2xl font-bold">{project?.name || 'Loading...'}</h2>
+                <h2 className="text-lg md:text-xl font-bold truncate">{project?.name || 'Loading...'}</h2>
             </div>
             
-            <div className="flex gap-6 mt-4">
-                {['files', 'samples', 'workflow', 'copilot'].map((tab) => (
-                    <button 
-                      key={tab} 
-                      onClick={() => setActiveTab(tab as any)} 
-                      className={`pb-2 text-sm font-medium transition-colors border-b-2 capitalize ${activeTab === tab ? 'border-blue-500 text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`}
-                    >
-                        {tab === 'copilot' ? '✨ Bio-Copilot' : tab}
-                    </button>
-                ))}
-            </div>
+            <AnimatedTabsUnderline
+              tabs={displayTabs.map(t => ({ id: t.id, label: t.label }))}
+              activeTab={activeTab}
+              onChange={(id) => setActiveTab(id as typeof activeTab)}
+              className="mt-2 md:mt-3"
+            />
           </div>
           
           {activeTab === 'files' && (
-             <div className="flex gap-3 mb-2">
-                <button onClick={openCreateFolderModal} className="bg-gray-800 hover:bg-gray-700 text-white px-3 py-1.5 rounded border border-gray-700 text-xs transition-colors shadow-sm">+ New Folder</button>
-                <button onClick={() => setShowUpload(true)} className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded shadow-lg shadow-blue-900/20 text-xs transition-colors">+ Upload Data</button>
+             <div className="flex gap-2 w-full sm:w-auto">
+                <Button variant="outline" size="sm" onClick={openCreateFolderModal} className="gap-1.5 md:gap-2 flex-1 sm:flex-none text-xs md:text-sm">
+                  <FolderPlus className="w-3.5 md:w-4 h-3.5 md:h-4" />
+                  <span className="hidden sm:inline">New Folder</span>
+                </Button>
+                <Button size="sm" onClick={() => setShowUpload(true)} className="gap-1.5 md:gap-2 flex-1 sm:flex-none text-xs md:text-sm">
+                  <Upload className="w-3.5 md:w-4 h-3.5 md:h-4" />
+                  <span className="hidden sm:inline">Upload</span>
+                </Button>
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  onClick={() => setFullscreen(!fullscreen)}
+                  className="touch-target-min"
+                  title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+                >
+                  {fullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+                </Button>
              </div>
+          )}
+
+          {activeTab !== 'files' && (
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={() => setFullscreen(!fullscreen)}
+              className="touch-target-min"
+              title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+            >
+              {fullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            </Button>
           )}
         </div>
       </div>
 
-      <div className="flex-1 overflow-hidden relative p-8 flex flex-col">
+      {/* Content */}
+      <div className={cn(
+        "flex-1 overflow-hidden relative flex flex-col",
+        fullscreen ? "fixed inset-0 z-50 bg-background pt-12" : "p-3 md:p-6"
+      )}>
+        {/* Fullscreen exit button */}
+        {fullscreen && (
+          <div className="absolute top-2 right-2 z-10 flex gap-2">
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={() => setFullscreen(false)}
+              className="touch-target-min bg-card/80 backdrop-blur-sm"
+            >
+              <Minimize2 className="w-4 h-4 mr-1" />
+              Exit Fullscreen
+            </Button>
+          </div>
+        )}
+        
         {activeTab === 'files' && (
             <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 flex-1 flex flex-col overflow-hidden">
-                <div className="flex items-center gap-2 text-sm text-gray-400 mb-4 bg-gray-900/50 p-3 rounded-lg border border-gray-800 shadow-sm flex-shrink-0">
-                    <span className={`cursor-pointer hover:text-white hover:underline transition-colors ${!currentFolderId ? 'font-bold text-white' : ''}`} onClick={() => setCurrentFolderId(null)}>Root</span>
+                {/* Breadcrumbs */}
+                <div className="flex items-center gap-1.5 md:gap-2 text-xs md:text-sm bg-card border border-border rounded-lg px-3 md:px-4 py-2 md:py-3 mb-3 md:mb-4 flex-shrink-0 overflow-x-auto scrollbar-hide">
+                    <span 
+                      className={cn(
+                        "cursor-pointer hover:text-primary hover:underline transition-colors font-medium whitespace-nowrap",
+                        !currentFolderId ? "text-primary" : "text-muted-foreground"
+                      )} 
+                      onClick={() => setCurrentFolderId(null)}
+                    >
+                      Root
+                    </span>
                     {breadcrumbs.map((b) => (
-                        <div key={b.id} className="flex items-center gap-2">
-                        <span>/</span>
-                        <span className={`cursor-pointer hover:text-white hover:underline transition-colors ${currentFolderId === b.id ? 'font-bold text-white' : ''}`} onClick={() => setCurrentFolderId(b.id)}>{b.name}</span>
+                        <div key={b.id} className="flex items-center gap-1.5 md:gap-2">
+                        <ChevronRight className="w-3 md:w-4 h-3 md:h-4 text-muted-foreground flex-shrink-0" />
+                        <span 
+                          className={cn(
+                            "cursor-pointer hover:text-primary hover:underline transition-colors whitespace-nowrap",
+                            currentFolderId === b.id ? "text-primary font-medium" : "text-muted-foreground"
+                          )} 
+                          onClick={() => setCurrentFolderId(b.id)}
+                        >
+                          {b.name}
+                        </span>
                         </div>
                     ))}
                 </div>
 
-                <div className="bg-gray-900 border border-gray-800 rounded-xl shadow-xl flex-1 flex flex-col overflow-hidden">
-                    <div className="flex bg-gray-800/50 text-gray-400 text-xs uppercase tracking-wider px-6 py-4 font-medium border-b border-gray-800">
-                        <div className="flex-1">Name</div>
-                        <div className="w-24">Size</div>
-                        <div className="w-24">Type</div>
-                        <div className="w-32">Date</div>
-                        <div className="w-32 text-right">Actions</div>
+                {/* Batch Action Bar */}
+                {selectedFiles.size > 0 && (
+                  <div className="flex items-center gap-2 mb-3 p-2 bg-primary/10 border border-primary/30 rounded-lg flex-shrink-0">
+                    <span className="text-sm text-primary font-medium">
+                      {selectedFiles.size} selected
+                    </span>
+                    <div className="flex gap-2 ml-auto">
+                      <Button 
+                        size="sm" 
+                        variant="outline" 
+                        onClick={handleBatchDownload}
+                        className="gap-1.5"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        Download
+                      </Button>
+                      <Button 
+                        size="sm" 
+                        variant="destructive" 
+                        onClick={handleBatchDelete}
+                        className="gap-1.5"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Delete
+                      </Button>
+                      <Button 
+                        size="sm" 
+                        variant="ghost" 
+                        onClick={() => { setSelectedFiles(new Set()); setBatchMode(false); }}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* File List */}
+                <Card className="flex-1 flex flex-col overflow-hidden">
+                    <div className="flex bg-muted/50 text-muted-foreground text-xs uppercase tracking-wider px-3 md:px-6 py-2 md:py-3 font-medium border-b items-center">
+                        <div className="w-8 flex-shrink-0">
+                          <input 
+                            type="checkbox" 
+                            checked={files.length > 0 && selectedFiles.size === files.length}
+                            onChange={toggleSelectAll}
+                            className="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+                          />
+                        </div>
+                        <div className="flex-1 min-w-0">Name</div>
+                        <div className="w-16 md:w-24 hidden sm:block">Size</div>
+                        <div className="w-20 md:w-24 hidden sm:block">Type</div>
+                        <div className="w-20 md:w-32 hidden md:block">Date</div>
+                        <div className="w-16 md:w-32 text-right hidden md:block">Actions</div>
                     </div>
                     
                     <div ref={parentRef} className="flex-1 overflow-auto relative">
                         {filesLoading && (
-                            <div className="absolute inset-0 bg-gray-900/50 backdrop-blur-sm flex items-center justify-center z-10">
-                                <span className="text-gray-400 animate-pulse font-medium">Loading files...</span>
+                            <div className="absolute inset-0 bg-card/50 backdrop-blur-sm flex items-center justify-center z-10">
+                                <span className="text-muted-foreground animate-pulse font-medium">Loading files...</span>
                             </div>
                         )}
-                        {!filesLoading && files.length === 0 && <div className="p-12 text-center text-gray-500">Folder is empty</div>}
+                        {!filesLoading && files.length === 0 && (
+                          <div className="p-8 md:p-12 text-center text-muted-foreground">
+                            <Folder className="w-10 md:w-12 h-10 md:h-12 mx-auto mb-2 md:3 opacity-30" />
+                            <p className="text-sm md:text-base">Folder is empty</p>
+                          </div>
+                        )}
                         
                         <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
                             {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                                 const file = files[virtualRow.index];
+                                const isSelected = selectedFiles.has(file.id);
                                 return (
                                     <div 
                                         key={file.id}
@@ -245,42 +470,112 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
                                             height: `${virtualRow.size}px`,
                                             transform: `translateY(${virtualRow.start}px)`,
                                         }}
-                                        className="flex items-center px-6 border-b border-gray-800/50 hover:bg-gray-800/50 transition-colors group"
+                                        className={cn(
+                                          "flex items-center px-3 md:px-6 border-b border-border/50 transition-colors group",
+                                          isSelected ? "bg-primary/5" : "hover:bg-muted/50"
+                                        )}
                                     >
-                                        <div className="flex-1 font-medium text-white flex items-center gap-3">
-                                            <div className={`flex items-center gap-3 ${file.is_directory ? 'cursor-pointer' : ''}`} onClick={() => file.is_directory && setCurrentFolderId(file.id)}>
-                                                {file.is_directory ? <svg className="w-6 h-6 text-yellow-500" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" /></svg> : <svg className="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>}
-                                                <span className={`${file.is_directory ? 'font-bold text-yellow-500 hover:underline' : ''} truncate max-w-xs block`}>{file.filename}</span>
+                                        <div className="w-8 flex-shrink-0">
+                                          <input 
+                                            type="checkbox" 
+                                            checked={isSelected}
+                                            onChange={() => toggleFileSelection(file.id)}
+                                            className="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+                                          />
+                                        </div>
+                                        <div className="flex-1 font-medium flex items-center gap-2 md:gap-3 min-w-0">
+                                            <div className={cn("flex items-center gap-2 md:gap-3", file.is_directory ? 'cursor-pointer' : '')} onClick={() => file.is_directory && setCurrentFolderId(file.id)}>
+                                                {file.is_directory ? <Folder className="w-5 md:w-6 h-5 md:h-6 text-yellow-500 flex-shrink-0" /> : <FileText className="w-4 md:w-5 h-4 md:h-5 text-blue-400 flex-shrink-0" />}
+                                                <span className={cn("truncate text-sm md:text-base", file.is_directory ? "font-bold text-yellow-500 hover:underline" : "")}>{file.filename}</span>
                                             </div>
                                         </div>
-                                        <div className="w-24 text-gray-400 text-sm font-mono">{formatSize(file.size)}</div>
-                                        <div className="w-24 text-gray-500 text-xs uppercase">{file.is_directory ? 'Folder' : file.content_type.split('/')[1] || 'File'}</div>
-                                        <div className="w-32 text-gray-500 text-sm">{new Date(file.uploaded_at).toLocaleDateString()}</div>
-                                        <div className="w-32 text-right opacity-0 group-hover:opacity-100 transition-opacity flex justify-end gap-2">
-                                            {!file.is_directory && <button onClick={() => handleDownload(file.id)} className="text-blue-400 hover:text-blue-300 p-1 bg-blue-900/20 rounded" title="Download"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg></button>}
-                                            <button onClick={() => setLinkTargetFileId(file.id)} className="text-emerald-400 hover:text-emerald-300 p-1 bg-emerald-900/20 rounded" title="Share"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" /></svg></button>
-                                            <button onClick={() => openRenameModal(file.id, file.filename)} className="text-yellow-400 hover:text-yellow-300 p-1 bg-yellow-900/20 rounded" title="Rename"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg></button>
-                                            <button onClick={() => openRemoveLinkModal(file.id)} className="text-gray-400 hover:text-white p-1 bg-gray-800 rounded" title="Unlink"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg></button>
-                                            <button onClick={() => openHardDeleteModal(file.id, file.is_directory)} className="text-red-500 hover:text-red-400 p-1 bg-red-900/20 rounded" title="Delete"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+                                        <div className="w-16 md:w-24 text-muted-foreground text-xs md:text-sm font-mono hidden sm:block">{formatSize(file.size)}</div>
+                                        <div className="w-20 md:w-24 text-muted-foreground text-xs uppercase hidden sm:block">{file.is_directory ? 'Folder' : file.content_type.split('/')[1] || 'File'}</div>
+                                        <div className="w-20 md:w-32 text-muted-foreground text-xs md:text-sm hidden md:block">{new Date(file.uploaded_at).toLocaleDateString()}</div>
+                                        <div className="w-16 md:w-32 text-right flex justify-end gap-0.5 md:gap-1">
+                                            {!file.is_directory && (
+                                              <Button variant="ghost" size="icon-sm" className="touch-target-min" onClick={() => handleDownload(file.id)} title="Download" aria-label="Download file">
+                                                <Download className="w-3.5 md:w-4 h-3.5 md:h-4" />
+                                              </Button>
+                                            )}
+                                            <Button variant="ghost" size="icon-sm" className="touch-target-min" onClick={() => setLinkTargetFileId(file.id)} title="Share" aria-label="Share to another project">
+                                                <Share2 className="w-3.5 md:w-4 h-3.5 md:h-4" />
+                                            </Button>
+                                            <Button variant="ghost" size="icon-sm" className="touch-target-min hidden sm:flex" onClick={() => openRenameModal(file.id, file.filename)} title="Rename" aria-label="Rename file">
+                                                <Pencil className="w-3.5 md:w-4 h-3.5 md:h-4" />
+                                            </Button>
+                                            <Button variant="ghost" size="icon-sm" className="touch-target-min" onClick={() => openRemoveLinkModal(file.id)} title="Unlink" aria-label="Remove from project">
+                                                <Link2Off className="w-3.5 md:w-4 h-3.5 md:h-4" />
+                                            </Button>
+                                            <Button variant="ghost" size="icon-sm" className="touch-target-min text-destructive hover:text-destructive" onClick={() => openHardDeleteModal(file.id, file.is_directory)} title="Delete" aria-label="Delete permanently">
+                                                <Trash2 className="w-3.5 md:w-4 h-3.5 md:h-4" />
+                                            </Button>
                                         </div>
                                     </div>
                                 );
                             })}
                         </div>
                     </div>
-                </div>
+                </Card>
             </div>
         )}
 
-        {activeTab === 'samples' && <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 h-full"><SampleManager projectId={projectId} /></div>}
-        {activeTab === 'workflow' && <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 h-full"><AnalysisManager projectId={projectId} isActive={isActive && activeTab === 'workflow'} /></div>}
-        {activeTab === 'copilot' && <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 h-full"><CopilotPanel projectId={projectId} /></div>}
+        {activeTab === 'samples' && (
+          <div className={cn(
+            "animate-in fade-in slide-in-from-bottom-2 duration-300 flex-1",
+            fullscreen ? "h-full" : ""
+          )}>
+            <SampleManager projectId={projectId} />
+          </div>
+        )}
+        {activeTab === 'workflow' && (
+          <div className={cn(
+            "animate-in fade-in slide-in-from-bottom-2 duration-300 flex-1",
+            fullscreen ? "h-full" : ""
+          )}>
+            <AnalysisManager projectId={projectId} isActive={isActive && activeTab === 'workflow'} />
+          </div>
+        )}
+        
+        {activeTab === 'copilot' && (
+          <div className={cn(
+            "animate-in fade-in slide-in-from-bottom-2 duration-300 flex-1 h-full"
+          )}>
+            <CopilotPanel 
+              projectId={projectId} 
+              fullscreen={fullscreen}
+              onToggleFullscreen={() => setFullscreen(!fullscreen)}
+            />
+          </div>
+        )}
+
+        {/* Floating Copilot Button for Mobile */}
+        {!fullscreen && typeof window !== 'undefined' && window.innerWidth < 768 && activeTab !== 'copilot' && (
+          <Button
+            className="fixed bottom-6 right-6 rounded-full w-14 h-14 shadow-lg bg-primary hover:bg-primary/90 z-40 touch-target-min"
+            onClick={() => { setActiveTab('copilot'); setFullscreen(true); }}
+          >
+            <Bot className="w-6 h-6" />
+          </Button>
+        )}
       </div>
 
       {showUpload && <UploadModal projectId={projectId} currentFolderId={currentFolderId} onClose={() => setShowUpload(false)} onUploadSuccess={() => queryClient.invalidateQueries({ queryKey: ['files', projectId] })} />}
       {linkTargetFileId && <LinkProjectModal fileId={linkTargetFileId} currentProjectId={projectId} onClose={() => setLinkTargetFileId(null)} />}
-      <ConfirmModal isOpen={confirmModal.isOpen} title={confirmModal.title} message={confirmModal.message} onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))} onConfirm={() => { confirmModal.action(); setConfirmModal(prev => ({ ...prev, isOpen: false })); }} />
-      <InputModal isOpen={inputModal.isOpen} title={inputModal.title} defaultValue={inputModal.defaultValue} onClose={() => setInputModal(prev => ({ ...prev, isOpen: false }))} onSubmit={(val) => { inputModal.onSubmit(val); setInputModal(prev => ({ ...prev, isOpen: false })); }} />
+      <ConfirmModal 
+        isOpen={confirmModal.isOpen} 
+        title={confirmModal.title} 
+        message={confirmModal.message} 
+        onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))} 
+        onConfirm={() => { confirmModal.action(); setConfirmModal(prev => ({ ...prev, isOpen: false })); }} 
+      />
+      <InputModal 
+        isOpen={inputModal.isOpen} 
+        title={inputModal.title} 
+        defaultValue={inputModal.defaultValue} 
+        onClose={() => setInputModal(prev => ({ ...prev, isOpen: false }))} 
+        onSubmit={(val) => { inputModal.onSubmit(val); setInputModal(prev => ({ ...prev, isOpen: false })); }} 
+      />
     </div>
   );
 }

@@ -28,6 +28,7 @@ class UserBase(SQLModel):
     email: str = Field(unique=True, index=True)
     full_name: Optional[str] = None
     is_active: bool = Field(default=True)
+    is_admin: bool = Field(default=False)
 
 class User(UserBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

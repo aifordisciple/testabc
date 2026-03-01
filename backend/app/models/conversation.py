@@ -59,4 +59,6 @@ class MessagePublic(SQLModel):
     created_at: datetime
     response_mode: Optional[str] = None
     response_data: Optional[dict] = None
+    plan_data: Optional[dict] = None  # Alias for response_data for frontend compatibility
     files: Optional[list] = None
+    attachments: Optional[list] = None  # Alias for files for frontend compatibility

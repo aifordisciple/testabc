@@ -6,6 +6,8 @@ import base64
 import pickle
 from typing import Dict, Any, Optional
 
+from app.core.error_classifier import error_classifier
+
 CONTEXT_FILE = ".context.pkl"
 
 CONTEXT_RESTORE_CODE = """
@@ -110,6 +112,8 @@ class SandboxService:
             print(f"❌ [Sandbox] Error: {stderr}", flush=True)
         
         output_context = None
+        output_files: list = []
+        
         if os.path.exists(container_workspace_dir):
             context_output_path = os.path.join(container_workspace_dir, CONTEXT_FILE)
             if os.path.exists(context_output_path):
@@ -189,12 +193,38 @@ class SandboxService:
                             print(f"⚠️ [Sandbox] Failed to read {rel_path}: {e}", flush=True)
                             
             shutil.rmtree(container_workspace_dir, ignore_errors=True)
+        
+        available_files = self._get_file_list(project_id)
+        
+        if not success:
+            classified = error_classifier.classify(
+                Exception(stderr),
+                stderr,
+                stdout
+            )
+            enhanced_message = error_classifier.format_error_message(classified, available_files)
             
+            return {
+                "success": False,
+                "stdout": stdout,
+                "stderr": stderr,
+                "files": output_files if 'output_files' in locals() else [],
+                "context": output_context,
+                "error_classified": {
+                    "type": classified.error_type.value,
+                    "category": classified.category,
+                    "message": classified.message,
+                    "suggestion": classified.suggestion,
+                    "severity": classified.severity.value,
+                    "enhanced_message": enhanced_message
+                }
+            }
+        
         return {
             "success": success,
             "stdout": stdout,
             "stderr": stderr,
-            "files": output_files,
+            "files": output_files if 'output_files' in locals() else [],
             "context": output_context
         }
 

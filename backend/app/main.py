@@ -3,12 +3,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from sqlmodel import select
-
+from sqlmodel import select, func
 from app.core.config import settings
 from app.core.db import init_db, get_session
-# 👇 修复点 1：清理了错误重复的 conversations 导入
-from app.api.routes import auth, files, workflow, admin, ai, knowledge
+from app.api.routes import auth, files, workflow, admin, ai, knowledge, conversations
+from app.api.routes import plugins as plugins_router
+from app.api.routes import orchestration as orchestration_router
+from app.api.routes import community as community_router
 from app.models.bio import WorkflowTemplate
 
 # === 数据预置 (Seeding) ===
@@ -58,10 +59,45 @@ async def lifespan(app: FastAPI):
             seed_initial_workflows()
         except Exception as e:
             print(f"⚠️ Seeding failed: {e}")
+        
+        # Check WorkflowTemplate count and warn if empty
+        try:
+            from app.core.db import engine
+            from sqlmodel import Session as CheckSession
+            with CheckSession(engine) as check_session:
+                template_count = check_session.exec(select(func.count(WorkflowTemplate.id))).one()
+                if template_count == 0:
+                    print("⚠️ WARNING: No WorkflowTemplates found in database!")
+                    print("⚠️ Bio-Copilot tool matching will not work properly.")
+                    print("⚠️ Please add workflow templates via Admin panel or API.")
+                else:
+                    print(f"✅ Found {template_count} WorkflowTemplate(s) in database.")
+        except Exception as e:
+            print(f"⚠️ Template check failed: {e}")
+        # Initialize plugins
+        try:
+            from app.core.db import engine
+            from sqlmodel import Session
+            from app.plugins import register_builtin_plugins, plugin_manager
+            
+            with Session(engine) as session:
+                register_builtin_plugins(plugin_manager, session)
+            
+            import asyncio
+            asyncio.run(plugin_manager.initialize())
+            print(f"✅ Loaded {len(plugin_manager.get_all())} plugins")
+        except Exception as e:
+            print(f"⚠️ Plugin initialization failed: {e}")
+            
     except Exception as e:
         print(f"❌ Database initialization failed: {e}")
     yield
     print("🛑 Autonome System Shutting Down...")
+    try:
+        import asyncio
+        asyncio.run(plugin_manager.shutdown())
+    except Exception as e:
+        print(f"⚠️ Plugin shutdown failed: {e}")
 
 # === 初始化 FastAPI ===
 app = FastAPI(
@@ -86,6 +122,12 @@ app.include_router(workflow.router, prefix=f"{settings.API_V1_STR}/workflow", ta
 app.include_router(admin.router, prefix=f"{settings.API_V1_STR}/admin", tags=["Admin"])
 app.include_router(ai.router, prefix=f"{settings.API_V1_STR}/ai", tags=["AI"]) 
 app.include_router(knowledge.router, prefix=f"{settings.API_V1_STR}/knowledge", tags=["Knowledge"])
+app.include_router(conversations.router, prefix=f"{settings.API_V1_STR}", tags=["Conversations"])
+app.include_router(plugins_router.router, prefix=f"{settings.API_V1_STR}/system", tags=["System"])
+app.include_router(orchestration_router.router, prefix=f"{settings.API_V1_STR}/ai/orchestration", tags=["Orchestration"])
+app.include_router(community_router.router, prefix=f"{settings.API_V1_STR}/community", tags=["Community"])
+
+
 
 @app.get("/")
 def root():

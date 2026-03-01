@@ -1,11 +1,21 @@
 'use client';
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
-import toast from 'react-hot-toast';
+import { toast } from '@/components/ui/Toast';
 import { useCopilotStore, ChatMessage as StoreChatMessage } from '@/stores/copilotStore';
+import { useTheme } from '@/stores/themeStore';
+import { useLocale } from '@/stores/localeStore';
+import { cn } from '@/lib/utils';
+import { FlaskConical, Check, Code, ClipboardCheck, Archive, Play, Send, X, Eye, Download, Trash2, Plus, Maximize2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Card, CardContent } from '@/components/ui/Card';
+import { Badge } from '@/components/ui/badge';
 
 interface CopilotPanelProps {
   projectId: string;
+  fullscreen?: boolean;
+  onToggleFullscreen?: () => void;
 }
 
 interface Attachment {
@@ -30,13 +40,17 @@ interface FullscreenPreview {
   name: string;
 }
 
-export default function CopilotPanel({ projectId }: CopilotPanelProps) {
+export default function CopilotPanel({ projectId, fullscreen = false, onToggleFullscreen }: CopilotPanelProps) {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
   const [streamingPlan, setStreamingPlan] = useState<string | null>(null);
   
   const [fullscreenPreview, setFullscreenPreview] = useState<FullscreenPreview | null>(null);
+  
+  const { resolvedTheme } = useTheme();
+  const { locale } = useLocale();
+  const isDark = resolvedTheme === 'dark';
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -206,6 +220,68 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
       isInitialLoadRef.current = true;
   };
 
+  const handleDeleteSession = async (sessionId: string) => {
+    if (sessionId === 'default') {
+      toast.error('Cannot delete the default session');
+      return;
+    }
+    if (!confirm(`Delete this chat session? The tasks will be preserved.`)) return;
+    
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/sessions/${sessionId}`,
+        {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` }
+        }
+      );
+      
+      if (res.ok) {
+        const newSessions = sessions.filter(s => s !== sessionId);
+        store.setSessions(projectId, newSessions);
+        store.clearProject(projectId);
+        if (currentSession === sessionId) {
+          setCurrentSession('default');
+        }
+        toast.success('Session deleted');
+        fetchSessions();
+      } else {
+        const err = await res.json();
+        toast.error(err.detail || 'Failed to delete session');
+      }
+    } catch (e) {
+      toast.error('Failed to delete session');
+    }
+  };
+
+  const handleClearSession = async () => {
+    if (!confirm(`Clear all messages in this session? This cannot be undone.`)) return;
+    
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/sessions/${currentSession}/clear`,
+        {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` }
+        }
+      );
+      
+      if (res.ok) {
+        store.setMessages(projectId, currentSession, []);
+        store.setHasMore(projectId, currentSession, false);
+        store.setOldestTimestamp(projectId, currentSession, null);
+        toast.success('Chat history cleared');
+      } else {
+        const err = await res.json();
+        toast.error(err.detail || 'Failed to clear history');
+      }
+    } catch (e) {
+      toast.error('Failed to clear history');
+    }
+  };
+
   const handleSendStream = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
@@ -309,12 +385,58 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
     }
   };
 
+  const handleConfirmTool = async (toolId: string, parameters: Record<string, any> = {}) => {
+    const toastId = toast.loading('Starting tool execution...');
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/confirm-tool`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ tool_id: toolId, parameters, session_id: currentSession })
+      });
+      
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || 'Failed to confirm tool');
+      }
+      
+      toast.success('Tool execution started!', { id: toastId });
+      await fetchRecentMessages();
+    } catch (e: any) {
+      toast.error(e.message, { id: toastId, duration: 6000 });
+    }
+  };
+
+  const handleSelectToolFromChoice = async (tool: any) => {
+    const planData = {
+      type: 'tool_choice',
+      selected_tool_id: tool.tool_id,
+      parameters: tool.inferred_params || {},
+      strategy: `Using ${tool.tool_name} for analysis`
+    };
+    
+    await handleConfirmTool(tool.tool_id, tool.inferred_params || {});
+  };
+
   const handleConfirmPlan = async (planDataStr: string) => {
     const toastId = toast.loading('Submitting task to cluster...');
     try {
       const token = localStorage.getItem('token');
       const plan = JSON.parse(planDataStr);
       const planType = plan.type || 'single';
+      
+      if (planType === 'tool_recommendation' && plan.matched_tools?.[0]) {
+        const tool = plan.matched_tools[0];
+        await handleConfirmTool(tool.tool_id, tool.inferred_params || plan.suggested_params || {});
+        toast.dismiss(toastId);
+        return;
+      }
+      
+      if (planType === 'tool_choice' && plan.selected_tool_id) {
+        await handleConfirmTool(plan.selected_tool_id, plan.parameters || {});
+        toast.dismiss(toastId);
+        return;
+      }
       
       let endpoint = `${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${projectId}/chat/execute-plan`;
       if (planType === 'multi') {
@@ -337,6 +459,249 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
     } catch (e: any) {
       toast.error(e.message, { id: toastId, duration: 6000 });
     }
+  };
+
+  const renderToolChoiceCard = (plan: any) => {
+    const matchedTools = plan.matched_tools || [];
+    const isHighConfidence = plan.type === 'tool_recommendation';
+    
+    return (
+      <div className="mt-4 bg-card border border-primary/30 rounded-2xl shadow-lg overflow-hidden">
+        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500"></div>
+        
+        <div className="p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+              <FlaskConical className="w-5 h-5 text-primary" />
+            </div>
+            <div>
+              <h4 className="text-lg font-bold text-foreground">
+                {isHighConfidence ? 'Recommended Tool' : 'Tool Options Available'}
+              </h4>
+              <p className="text-xs text-primary">
+                {isHighConfidence ? 'High confidence match found' : 'Select a tool or use custom code'}
+              </p>
+            </div>
+          </div>
+          
+          {plan.strategy && (
+            <div className="bg-card/50 rounded-xl p-4 mb-5 border border-border">
+              <div className="flex items-start gap-2">
+                <span className="text-lg">💡</span>
+                <p className="text-foreground text-sm leading-relaxed flex-1">{plan.strategy}</p>
+              </div>
+            </div>
+          )}
+          
+          <div className="space-y-3 mb-5">
+            {matchedTools.map((tool: any, idx: number) => {
+              const scorePercent = Math.round((tool.match_score || 0) * 100);
+              const scoreColor = scorePercent >= 75 ? 'text-emerald-500' : scorePercent >= 50 ? 'text-yellow-500' : 'text-muted-foreground';
+              
+              return (
+                <div 
+                  key={tool.tool_id}
+                  className="bg-primary/5 border border-primary/20 rounded-xl p-4 hover:bg-primary/10 transition-colors"
+                >
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
+                        <span className="text-lg">🔧</span>
+                      </div>
+                      <div>
+                        <div className="text-foreground font-medium">{tool.tool_name}</div>
+                        <div className="text-xs text-muted-foreground">{tool.workflow_type}</div>
+                      </div>
+                    </div>
+                    <div className={`text-right ${scoreColor}`}>
+                      <div className="text-lg font-bold">{scorePercent}%</div>
+                      <div className="text-xs">match</div>
+                    </div>
+                  </div>
+                  
+                  {tool.description && (
+                    <p className="text-xs text-muted-foreground mb-3">{tool.description}</p>
+                  )}
+                  
+                  {tool.match_reason && (
+                    <div className="text-xs text-primary/80 mb-3">
+                      <span className="font-medium">Why: </span>{tool.match_reason}
+                    </div>
+                  )}
+                  
+                  {tool.params_schema && Object.keys(tool.params_schema.properties || {}).length > 0 && (
+                    <details className="mb-3">
+                      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+                        📋 View Parameters Schema ({Object.keys(tool.params_schema.properties || {}).length} params)
+                      </summary>
+                      <div className="mt-2 bg-card rounded-lg p-3 text-xs font-mono overflow-x-auto max-h-40 overflow-y-auto">
+                        <pre className="text-foreground">{JSON.stringify(tool.params_schema, null, 2)}</pre>
+                      </div>
+                    </details>
+                  )}
+                  
+                  {tool.inferred_params && Object.keys(tool.inferred_params).length > 0 && (
+                    <div className="text-xs text-muted-foreground mb-3">
+                      <span className="font-medium">Suggested params: </span>
+                      <span className="text-emerald-500">{JSON.stringify(tool.inferred_params)}</span>
+                    </div>
+                  )}
+                  
+                  <Button
+                    onClick={() => handleSelectToolFromChoice(tool)}
+                    className="w-full mt-2 gap-2"
+                  >
+                    <Check className="w-4 h-4" />
+                    Use This Tool
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+          
+          {!isHighConfidence && (
+            <Button
+              variant="outline"
+              onClick={() => {
+                const customPlan = {
+                  type: 'single',
+                  method: 'sandbox',
+                  strategy: 'Generate custom Python code for this analysis',
+                  custom_code: '# Custom code will be generated based on your request'
+                };
+                handleConfirmPlan(JSON.stringify(customPlan));
+              }}
+              className="w-full gap-2"
+            >
+              <Code className="w-4 h-4" />
+              Generate Custom Code Instead
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderPlanCard = (planDataStr: string) => {
+    let plan;
+    try { plan = JSON.parse(planDataStr); } catch { return null; }
+    
+    const planType = plan.type || 'single';
+    
+    if (planType === 'tool_recommendation' || planType === 'tool_choice') {
+      return renderToolChoiceCard(plan);
+    }
+    
+    const isMultiStep = planType === 'multi';
+
+    return (
+      <div className="mt-4 bg-card border border-emerald-500/30 rounded-2xl shadow-lg overflow-hidden">
+        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500"></div>
+        
+        <div className="p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center">
+              <ClipboardCheck className="w-5 h-5 text-emerald-500" />
+            </div>
+            <div>
+              <h4 className="text-lg font-bold text-foreground">
+                {isMultiStep ? `Multi-Step Analysis (${plan.steps?.length || 0} Steps)` : 'Analysis Strategy'}
+              </h4>
+              <p className="text-xs text-emerald-500">Review and confirm to execute</p>
+            </div>
+          </div>
+          
+          <div className="bg-card/50 rounded-xl p-4 mb-5 border border-border">
+            <div className="flex items-start gap-2">
+              <span className="text-lg">💡</span>
+              <p className="text-foreground text-sm leading-relaxed flex-1">{plan.strategy}</p>
+            </div>
+          </div>
+          
+          {isMultiStep ? (
+            <div className="mb-5">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="w-2 h-2 rounded-full bg-purple-500"></div>
+                <span className="text-xs text-muted-foreground uppercase tracking-wider font-semibold">Execution Steps</span>
+              </div>
+              
+              <div className="space-y-3">
+                {plan.steps?.map((step: any, idx: number) => (
+                  <div key={idx} className="bg-purple-500/10 border border-purple-500/20 rounded-xl p-4">
+                    <div className="flex items-center gap-3 mb-2">
+                      <div className="w-8 h-8 rounded-full bg-purple-500/20 flex items-center justify-center flex-shrink-0">
+                        <span className="text-purple-400 font-semibold text-sm">{step.step || idx + 1}</span>
+                      </div>
+                      <div>
+                        <div className="text-foreground font-medium">{step.action}</div>
+                        <div className="text-xs text-muted-foreground">Expected: {step.expected_output}</div>
+                      </div>
+                    </div>
+                    <pre className="bg-muted p-3 text-xs text-foreground font-mono overflow-x-auto max-h-32 overflow-y-auto rounded-lg">
+                      <code>{step.code}</code>
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="mb-5">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="w-2 h-2 rounded-full bg-blue-500"></div>
+                <span className="text-xs text-muted-foreground uppercase tracking-wider font-semibold">Execution Method</span>
+              </div>
+              
+              {plan.method === 'workflow' ? (
+                <div className="flex items-center gap-3 bg-blue-500/10 border border-blue-500/20 rounded-xl p-4">
+                  <div className="w-12 h-12 rounded-lg bg-blue-500/10 flex items-center justify-center flex-shrink-0">
+                    <Archive className="w-6 h-6 text-blue-500" />
+                  </div>
+                  <div>
+                    <div className="text-xs text-blue-400 mb-1">Predefined Pipeline</div>
+                    <div className="text-foreground font-mono font-semibold">{plan.workflow_name}</div>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-purple-500/10 border border-purple-500/20 rounded-xl overflow-hidden">
+                  <div className="flex items-center gap-3 p-4 border-b border-purple-500/10">
+                    <div className="w-10 h-10 rounded-lg bg-purple-500/10 flex items-center justify-center flex-shrink-0">
+                      <Code className="w-5 h-5 text-purple-400" />
+                    </div>
+                    <div>
+                      <div className="text-xs text-purple-400">Custom Python Code</div>
+                      <div className="text-foreground text-sm">Sandbox Environment</div>
+                    </div>
+                  </div>
+                  <div className="relative">
+                    <div className="absolute top-2 left-0 right-0 flex items-center justify-between px-4 z-10">
+                      <span className="text-[10px] text-muted-foreground font-mono">python</span>
+                      <div className="flex gap-1">
+                        <div className="w-2 h-2 rounded-full bg-red-500/50"></div>
+                        <div className="w-2 h-2 rounded-full bg-yellow-500/50"></div>
+                        <div className="w-2 h-2 rounded-full bg-green-500/50"></div>
+                      </div>
+                    </div>
+                    <pre className="bg-muted p-4 pt-8 text-xs text-emerald-600 dark:text-emerald-400 font-mono overflow-x-auto max-h-64 overflow-y-auto rounded-lg leading-relaxed">
+                      <code>{plan.custom_code}</code>
+                    </pre>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex items-center gap-3">
+            <Button 
+              onClick={() => handleConfirmPlan(planDataStr)} 
+              className="flex-1 gap-2"
+            >
+              <Play className="w-5 h-5" />
+              {isMultiStep ? 'Execute Task Chain' : 'Execute Analysis'}
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   const downloadFile = (dataUrl: string, filename: string) => {
@@ -365,24 +730,20 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
         {attachments.map((att, idx) => {
           if (att.type === 'image') {
             return (
-              <div key={idx} className="bg-gray-900 rounded-xl p-4 border border-gray-700">
+              <div key={idx} className="bg-card rounded-xl p-4 border border-border">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-400 flex items-center gap-2">
+                  <span className="text-sm text-muted-foreground flex items-center gap-2">
                     <span>📊</span> {att.name}
                   </span>
                   <div className="flex gap-2">
-                    <button 
-                      onClick={() => setFullscreenPreview({ type: 'image', data: att.data!, name: att.name })}
-                      className="text-blue-400 text-xs hover:underline flex items-center gap-1"
-                    >
-                      🔍 Fullscreen
-                    </button>
-                    <button 
-                      onClick={() => att.data && downloadFile(att.data, att.name)}
-                      className="text-blue-400 text-xs hover:underline flex items-center gap-1"
-                    >
-                      ⬇️ Download
-                    </button>
+                    <Button variant="ghost" size="sm" onClick={() => setFullscreenPreview({ type: 'image', data: att.data!, name: att.name })}>
+                      <Eye className="w-4 h-4 mr-1" />
+                      Fullscreen
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => att.data && downloadFile(att.data, att.name)}>
+                      <Download className="w-4 h-4 mr-1" />
+                      Download
+                    </Button>
                   </div>
                 </div>
                 <img 
@@ -398,25 +759,21 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
           if (att.type === 'table') {
             const lines = (att.preview || '').split('\n').slice(0, 20);
             return (
-              <div key={idx} className="bg-gray-900 rounded-xl p-4 border border-gray-700">
+              <div key={idx} className="bg-card rounded-xl p-4 border border-border">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-400 flex items-center gap-2">
+                  <span className="text-sm text-muted-foreground flex items-center gap-2">
                     <span>📄</span> {att.name}
                   </span>
-                  <div className="flex gap-2">
-                    <button 
-                      onClick={() => setFullscreenPreview({ type: 'table', data: att.preview || '', name: att.name })}
-                      className="text-blue-400 text-xs hover:underline flex items-center gap-1"
-                    >
-                      🔍 View All
-                    </button>
-                  </div>
+                  <Button variant="ghost" size="sm" onClick={() => setFullscreenPreview({ type: 'table', data: att.preview || '', name: att.name })}>
+                    <Eye className="w-4 h-4 mr-1" />
+                    View All
+                  </Button>
                 </div>
-                <div className="overflow-x-auto max-h-48 text-xs text-gray-300 font-mono bg-gray-950 rounded p-2">
+                <div className="overflow-x-auto max-h-48 text-xs text-foreground font-mono bg-muted rounded p-2">
                   <table className="w-full">
                     <tbody>
                       {lines.map((row, i) => (
-                        <tr key={i} className="border-b border-gray-800">
+                        <tr key={i} className="border-b border-border">
                           {row.split(/[,\t]/).map((cell, j) => (
                             <td key={j} className="px-2 py-1 whitespace-nowrap">{cell}</td>
                           ))}
@@ -431,30 +788,26 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
 
           if (att.type === 'pdf') {
             return (
-              <div key={idx} className="bg-gray-900 rounded-xl p-4 border border-gray-700">
+              <div key={idx} className="bg-card rounded-xl p-4 border border-border">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-400 flex items-center gap-2">
+                  <span className="text-sm text-muted-foreground flex items-center gap-2">
                     <span>📕</span> {att.name}
                   </span>
                   <div className="flex gap-2">
-                    <button 
-                      onClick={() => setFullscreenPreview({ type: 'pdf', data: att.data!, name: att.name })}
-                      className="text-blue-400 text-xs hover:underline flex items-center gap-1"
-                    >
-                      🔍 Preview
-                    </button>
-                    <button 
-                      onClick={() => att.data && downloadFile(att.data, att.name)}
-                      className="text-blue-400 text-xs hover:underline flex items-center gap-1"
-                    >
-                      ⬇️ Download
-                    </button>
+                    <Button variant="ghost" size="sm" onClick={() => setFullscreenPreview({ type: 'pdf', data: att.data!, name: att.name })}>
+                      <Eye className="w-4 h-4 mr-1" />
+                      Preview
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => att.data && downloadFile(att.data, att.name)}>
+                      <Download className="w-4 h-4 mr-1" />
+                      Download
+                    </Button>
                   </div>
                 </div>
-                <div className="bg-gray-950 rounded-lg p-6 text-center">
+                <div className="bg-muted/50 rounded-lg p-6 text-center">
                   <div className="text-4xl mb-2">📕</div>
-                  <div className="text-sm text-gray-400">{att.name}</div>
-                  <div className="text-xs text-gray-500 mt-1">Click Preview to view or Download to save</div>
+                  <div className="text-sm text-muted-foreground">{att.name}</div>
+                  <div className="text-xs text-muted-foreground mt-1">Click Preview to view or Download to save</div>
                 </div>
               </div>
             );
@@ -462,132 +815,6 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
 
           return null;
         })}
-      </div>
-    );
-  };
-
-  const renderPlanCard = (planDataStr: string) => {
-    let plan;
-    try { plan = JSON.parse(planDataStr); } catch { return null; }
-    
-    const planType = plan.type || 'single';
-    const isMultiStep = planType === 'multi';
-
-    return (
-      <div className="mt-4 bg-gradient-to-br from-gray-900 via-gray-900 to-gray-800 border border-emerald-500/30 rounded-2xl shadow-2xl relative overflow-hidden">
-        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500"></div>
-        
-        <div className="p-6">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/20 flex items-center justify-center">
-              <svg className="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-              </svg>
-            </div>
-            <div>
-              <h4 className="text-lg font-bold text-white">
-                {isMultiStep ? `Multi-Step Analysis (${plan.steps?.length || 0} Steps)` : 'Analysis Strategy'}
-              </h4>
-              <p className="text-xs text-emerald-400">Review and confirm to execute</p>
-            </div>
-          </div>
-          
-          <div className="bg-gray-950/50 rounded-xl p-4 mb-5 border border-gray-700/50">
-            <div className="flex items-start gap-2">
-              <span className="text-lg">💡</span>
-              <p className="text-gray-300 text-sm leading-relaxed flex-1">{plan.strategy}</p>
-            </div>
-          </div>
-          
-          {isMultiStep ? (
-            <div className="mb-5">
-              <div className="flex items-center gap-2 mb-3">
-                <div className="w-2 h-2 rounded-full bg-purple-400"></div>
-                <span className="text-xs text-gray-400 uppercase tracking-wider font-semibold">Execution Steps</span>
-              </div>
-              
-              <div className="space-y-3">
-                {plan.steps?.map((step: any, idx: number) => (
-                  <div key={idx} className="bg-purple-500/10 border border-purple-500/30 rounded-xl p-4">
-                    <div className="flex items-center gap-3 mb-2">
-                      <div className="w-8 h-8 rounded-full bg-purple-500/30 flex items-center justify-center flex-shrink-0">
-                        <span className="text-purple-300 font-semibold text-sm">{step.step || idx + 1}</span>
-                      </div>
-                      <div>
-                        <div className="text-white font-medium">{step.action}</div>
-                        <div className="text-xs text-gray-400">Expected: {step.expected_output}</div>
-                      </div>
-                    </div>
-                    <pre className="bg-[#0d1117] p-3 text-xs text-green-400 font-mono overflow-x-auto max-h-32 overflow-y-auto rounded-lg">
-                      <code>{step.code}</code>
-                    </pre>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="mb-5">
-              <div className="flex items-center gap-2 mb-3">
-                <div className="w-2 h-2 rounded-full bg-blue-400"></div>
-                <span className="text-xs text-gray-400 uppercase tracking-wider font-semibold">Execution Method</span>
-              </div>
-              
-              {plan.method === 'workflow' ? (
-                <div className="flex items-center gap-3 bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
-                  <div className="w-12 h-12 rounded-lg bg-blue-500/20 flex items-center justify-center flex-shrink-0">
-                    <svg className="w-6 h-6 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                    </svg>
-                  </div>
-                  <div>
-                    <div className="text-xs text-blue-300 mb-1">Predefined Pipeline</div>
-                    <div className="text-white font-mono font-semibold">{plan.workflow_name}</div>
-                  </div>
-                </div>
-              ) : (
-                <div className="bg-purple-500/10 border border-purple-500/30 rounded-xl overflow-hidden">
-                  <div className="flex items-center gap-3 p-4 border-b border-purple-500/20">
-                    <div className="w-10 h-10 rounded-lg bg-purple-500/20 flex items-center justify-center flex-shrink-0">
-                      <svg className="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-                      </svg>
-                    </div>
-                    <div>
-                      <div className="text-xs text-purple-300">Custom Python Code</div>
-                      <div className="text-white text-sm">Sandbox Environment</div>
-                    </div>
-                  </div>
-                  <div className="relative">
-                    <div className="absolute top-2 left-0 right-0 flex items-center justify-between px-4 z-10">
-                      <span className="text-[10px] text-gray-500 font-mono">python</span>
-                      <div className="flex gap-1">
-                        <div className="w-2 h-2 rounded-full bg-red-500/50"></div>
-                        <div className="w-2 h-2 rounded-full bg-yellow-500/50"></div>
-                        <div className="w-2 h-2 rounded-full bg-green-500/50"></div>
-                      </div>
-                    </div>
-                    <pre className="bg-[#0d1117] p-4 pt-8 text-xs text-green-400 font-mono overflow-x-auto max-h-64 overflow-y-auto leading-relaxed">
-                      <code>{plan.custom_code}</code>
-                    </pre>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          <div className="flex items-center gap-3">
-            <button 
-              onClick={() => handleConfirmPlan(planDataStr)} 
-              className="flex-1 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white px-5 py-3 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              {isMultiStep ? 'Execute Task Chain' : 'Execute Analysis'}
-            </button>
-          </div>
-        </div>
       </div>
     );
   };
@@ -602,13 +829,10 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
       >
         <div className="relative max-w-6xl max-h-full w-full" onClick={e => e.stopPropagation()}>
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-white font-medium">{fullscreenPreview.name}</h3>
-            <button 
-              onClick={() => setFullscreenPreview(null)}
-              className="text-gray-400 hover:text-white text-2xl"
-            >
-              ✕
-            </button>
+            <h3 className="text-foreground font-medium">{fullscreenPreview.name}</h3>
+            <Button variant="ghost" size="icon" onClick={() => setFullscreenPreview(null)}>
+              <X className="w-5 h-5" />
+            </Button>
           </div>
           
           {fullscreenPreview.type === 'image' && (
@@ -620,11 +844,11 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
           )}
           
           {fullscreenPreview.type === 'table' && (
-            <div className="bg-gray-900 rounded-xl p-6 max-h-[85vh] overflow-auto">
-              <table className="w-full text-sm text-gray-300 font-mono">
+            <div className="bg-card rounded-xl p-6 max-h-[85vh] overflow-auto border border-border">
+              <table className="w-full text-sm text-foreground font-mono">
                 <tbody>
                   {fullscreenPreview.data.split('\n').map((row, i) => (
-                    <tr key={i} className="border-b border-gray-800">
+                    <tr key={i} className="border-b border-border">
                       {row.split(/[,\t]/).map((cell, j) => (
                         <td key={j} className="px-3 py-2 whitespace-nowrap">{cell}</td>
                       ))}
@@ -636,7 +860,7 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
           )}
           
           {fullscreenPreview.type === 'pdf' && (
-            <div className="bg-gray-900 rounded-xl max-h-[85vh] overflow-hidden">
+            <div className="bg-card rounded-xl max-h-[85vh] overflow-hidden">
               <iframe 
                 src={fullscreenPreview.data}
                 className="w-full h-[80vh] rounded-lg"
@@ -650,17 +874,18 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
   };
 
   const renderMessage = (msg: ChatMessage, idx: number) => {
+    const maxWidthClass = fullscreen ? "max-w-[95%]" : "max-w-[85%]";
     return (
       <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-2`}>
-        <div className={`max-w-[85%] rounded-2xl px-5 py-3 ${
-          msg.role === 'user' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'bg-gray-800 text-gray-200 border border-gray-700 shadow-md'
+        <div className={`${maxWidthClass} rounded-2xl px-4 md:px-5 py-3 ${
+          msg.role === 'user' ? 'bg-primary text-primary-foreground shadow-lg' : 'bg-card text-foreground border border-border'
         }`}>
-          <div className={`prose prose-sm max-w-none ${msg.role === 'user' ? 'prose-invert' : 'prose-invert prose-blue'}`}>
+          <div className={`prose prose-sm ${isDark ? 'prose-invert' : ''} max-w-none`}>
             <ReactMarkdown
               urlTransform={(value: string) => value}
               components={{
                 img: ({node, ...props}) => (
-                  <div className="my-4 bg-[#0d1117] p-3 rounded-xl border border-gray-700/50 inline-block shadow-inner">
+                  <div className="my-4 bg-muted/50 p-3 rounded-xl border border-border inline-block">
                     <img {...props} className="max-w-full h-auto rounded-lg cursor-pointer hover:opacity-90" alt="AI Generated Graphic" />
                   </div>
                 )
@@ -677,18 +902,38 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#0d1117]">
-      <div className="p-4 border-b border-gray-800 bg-gray-900/50 flex justify-between items-center shadow-sm">
-        <div className="flex items-center gap-3">
-            <span className="text-2xl animate-pulse">✨</span>
-            <div>
-              <h3 className="font-bold text-white text-lg">Bio-Copilot</h3>
-              <p className="text-xs text-blue-400 font-medium">Your AI Bioinformatics Planner</p>
-            </div>
+    <div className="flex flex-col h-full bg-background text-foreground">
+      {/* Header - minimal in fullscreen mode */}
+      <div className={cn(
+        "border-b border-border bg-card/50 flex justify-between items-center gap-2",
+        fullscreen ? "p-2" : "p-3 md:p-4"
+      )}>
+        <div className="flex items-center gap-2 md:gap-3 min-w-0">
+            <span className={cn("animate-pulse flex-shrink-0", fullscreen ? "text-lg" : "text-xl md:text-2xl")}>✨</span>
+            {!fullscreen && (
+              <div className="min-w-0">
+                <h3 className="font-bold text-foreground text-sm md:text-lg truncate">{locale === 'zh' ? '生物 Copilot' : 'Bio-Copilot'}</h3>
+                <p className="text-xs text-primary font-medium hidden sm:block">{locale === 'zh' ? '您的 AI 生物信息学规划师' : 'Your AI Bioinformatics Planner'}</p>
+              </div>
+            )}
+            {fullscreen && (
+              <h3 className="font-bold text-foreground text-sm truncate">{locale === 'zh' ? '生物 Copilot' : 'Bio-Copilot'}</h3>
+            )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 md:gap-2 flex-shrink-0">
+            {!fullscreen && onToggleFullscreen && (
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                onClick={onToggleFullscreen}
+                className="touch-target-min"
+                title={locale === 'zh' ? '全屏模式' : 'Fullscreen'}
+              >
+                <Maximize2 className="w-4 h-4" />
+              </Button>
+            )}
             <select 
-                className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-1.5 outline-none focus:border-blue-500"
+                className="bg-background border border-input text-foreground text-xs rounded-lg px-2 py-1.5 outline-none focus:border-primary max-w-[80px] md:max-w-none"
                 value={currentSession}
                 onChange={(e) => { 
                   setCurrentSession(e.target.value); 
@@ -696,33 +941,44 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
                   isInitialLoadRef.current = true;
                 }}
             >
-                {sessions.map(s => <option key={s} value={s}>{s === 'default' ? 'Main Session' : `Chat (${s.slice(-6)})`}</option>)}
+                {sessions.map(s => <option key={s} value={s}>{s === 'default' ? (locale === 'zh' ? '主会话' : 'Main') : `Chat (${s.slice(-4)})`}</option>)}
             </select>
-            <button onClick={handleNewSession} className="bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 text-xs px-3 py-1.5 rounded-lg border border-blue-900/50 transition-colors">
-                + New
-            </button>
+            {messages.length > 0 && (
+              <Button variant="ghost" size="sm" onClick={handleClearSession} className="text-yellow-500 touch-target-min" title="Clear chat history">
+                🧹
+              </Button>
+            )}
+            {currentSession !== 'default' && (
+              <Button variant="ghost" size="sm" onClick={() => handleDeleteSession(currentSession)} className="text-destructive touch-target-min" title="Delete current session">
+                <Trash2 className="w-4 h-4" />
+              </Button>
+            )}
+            <Button variant="outline" size="sm" onClick={handleNewSession} className="gap-1 text-xs">
+                <Plus className="w-3.5 md:w-4 h-3.5 md:h-4" />
+                <span className="hidden sm:inline">{locale === 'zh' ? '新建' : 'New'}</span>
+            </Button>
         </div>
       </div>
 
-      <div ref={messagesContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
+      <div ref={messagesContainerRef} onScroll={handleScroll} className={cn(
+        "flex-1 overflow-y-auto space-y-3 md:space-y-6 scrollbar-thin",
+        fullscreen ? "p-2 md:p-3" : "p-3 md:p-6"
+      )}>
         {hasMore && (
           <div className="text-center py-2">
             {isLoadingMore ? (
-              <span className="text-gray-500 text-sm">⏳ Loading older messages...</span>
+              <span className="text-muted-foreground text-sm">⏳ {locale === 'zh' ? '加载中...' : 'Loading...'}</span>
             ) : (
-              <button 
-                onClick={fetchOlderMessages}
-                className="text-blue-400 text-sm hover:underline"
-              >
-                ↑ Load older messages
-              </button>
+              <Button variant="link" onClick={fetchOlderMessages}>
+                ↑ {locale === 'zh' ? '加载更早消息' : 'Load older messages'}
+              </Button>
             )}
           </div>
         )}
         {messages.length === 0 && !streamingContent ? (
           <div className="h-full flex flex-col items-center justify-center text-center opacity-50">
-            <span className="text-5xl mb-4">🧬</span>
-            <p className="text-gray-400">Ask about your files, or request an analysis pipeline.</p>
+            <span className="text-4xl md:text-5xl mb-3 md:4">🧬</span>
+            <p className="text-sm md:text-base text-muted-foreground px-4">{locale === 'zh' ? '询问关于您的文件，或请求分析流程。' : 'Ask about your files, or request an analysis pipeline.'}</p>
           </div>
         ) : (
           <>
@@ -730,8 +986,11 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
             
             {streamingContent && (
               <div className="flex justify-start animate-in fade-in">
-                <div className="max-w-[85%] rounded-2xl px-5 py-3 bg-gray-800 text-gray-200 border border-gray-700 shadow-md">
-                  <div className="prose prose-sm max-w-none prose-invert prose-blue">
+                <div className={cn(
+                  "rounded-2xl px-4 md:px-5 py-3 bg-card text-foreground border border-border",
+                  fullscreen ? "max-w-[95%]" : "max-w-[90%] sm:max-w-[85%]"
+                )}>
+                  <div className={`prose prose-sm ${isDark ? 'prose-invert' : ''} max-w-none`}>
                     <ReactMarkdown>{streamingContent}</ReactMarkdown>
                   </div>
                   {streamingPlan && renderPlanCard(streamingPlan)}
@@ -743,29 +1002,32 @@ export default function CopilotPanel({ projectId }: CopilotPanelProps) {
         
         {isLoading && !streamingContent && (
           <div className="flex justify-start">
-            <div className="bg-gray-800 border border-gray-700 rounded-2xl px-5 py-4 flex items-center gap-3">
-              <span className="relative flex h-3 w-3"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span><span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span></span>
-              <span className="text-gray-400 text-sm animate-pulse">Thinking...</span>
+            <div className="bg-card border border-border rounded-2xl px-4 md:px-5 py-3 md:py-4 flex items-center gap-2 md:gap-3">
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-primary"></span>
+              </span>
+              <span className="text-muted-foreground text-sm animate-pulse">{locale === 'zh' ? '思考中...' : 'Thinking...'}</span>
             </div>
           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="p-4 bg-gray-900 border-t border-gray-800">
-        <form onSubmit={handleSendStream} className="relative max-w-4xl mx-auto flex items-end bg-[#0f1218] border border-gray-700 rounded-xl overflow-hidden focus-within:border-blue-500 transition-all shadow-inner">
+      <div className="p-2 md:p-4 bg-card border-t border-border">
+        <form onSubmit={handleSendStream} className="relative max-w-4xl mx-auto flex items-end bg-background border border-input rounded-xl overflow-hidden focus-within:border-primary transition-all">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendStream(e); } }}
-            placeholder="E.g., What files do I have? OR Plot a PCA from data.csv..."
-            className="w-full bg-transparent text-white px-4 py-4 max-h-32 outline-none resize-none placeholder-gray-500 text-sm"
+            placeholder={locale === 'zh' ? '例如：我的文件有哪些？或者：绘制 data.csv 的 PCA 图...' : 'E.g., What files do I have? OR Plot a PCA from data.csv...'}
+            className="w-full bg-transparent text-foreground px-3 md:px-4 py-2 md:py-3 max-h-24 md:max-h-32 outline-none resize-none placeholder:text-muted-foreground text-sm"
             rows={1}
           />
-          <div className="p-2 flex-shrink-0">
-            <button type="submit" disabled={!input.trim() || isLoading} className="p-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg transition-colors shadow-md">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" /></svg>
-            </button>
+          <div className="p-1.5 md:p-2 flex-shrink-0">
+            <Button type="submit" disabled={!input.trim() || isLoading} size="sm">
+              <Send className="w-4 md:w-5 h-4 md:h-5" />
+            </Button>
           </div>
         </form>
       </div>

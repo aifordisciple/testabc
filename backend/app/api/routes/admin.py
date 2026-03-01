@@ -19,7 +19,8 @@ from app.models.bio import (
 router = APIRouter()
 
 def check_admin(user: User):
-    pass
+    if not user.is_admin:
+        raise HTTPException(403, "Admin privileges required")
 
 @router.post("/workflows", response_model=WorkflowTemplatePublic)
 def create_workflow_template(

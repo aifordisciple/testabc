@@ -44,16 +44,19 @@ class WorkflowMatcher:
     }
     
     def __init__(self):
-        self.base_url = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")
-        self.api_key = os.getenv("LLM_API_KEY", "ollama")
-        self.model = os.getenv("LLM_MODEL", "qwen2.5-coder:32b")
+        # Use unified llm_client singleton
+        from app.core.llm import llm_client
+        
+        self.base_url = llm_client.base_url
+        self.api_key = llm_client.api_key
+        self.model = llm_client.model
         
         embed_base_url = os.getenv("EMBED_BASE_URL", self.base_url)
         embed_api_key = os.getenv("EMBED_API_KEY", self.api_key)
         self.embed_model = os.getenv("EMBEDDING_MODEL", "nomic-embed-text:latest")
         self.embed_client = OpenAI(base_url=embed_base_url, api_key=embed_api_key)
         
-        print(f"🔗 [WorkflowMatcher] Initialized", flush=True)
+        print(f"🔗 [WorkflowMatcher] Initialized with unified LLM client", flush=True)
     
     def get_embedding(self, text: str) -> List[float]:
         """获取文本的向量嵌入"""

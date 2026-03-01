@@ -41,6 +41,8 @@ class WorkflowTemplate(WorkflowTemplateBase, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
     is_public: bool = Field(default=True)
+    created_by: Optional[int] = Field(default=None, description="创建者用户ID")
+    review_status: Optional[str] = Field(default=None, description="审核状态: pending/approved/rejected")
     
     embedding: Optional[List[float]] = Field(
         default=None,

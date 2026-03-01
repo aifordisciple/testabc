@@ -84,11 +84,13 @@ def run_ai_workflow_task(analysis_id: str, session_id: str = "default"):
             project_id = analysis.project_id
             
             status_icon = "✅" if success else "❌"
-            md_msg = f"### {status_icon} Predefined Tool/Pipeline `{workflow_name}` Finished (ID: `{analysis_id[:8]}`)\n\n"
+            md_msg = f"### {status_icon} Tool/Pipeline `{workflow_name}` Finished\n\n"
+            md_msg += f"**Task ID:** `{analysis_id[:8]}`\n\n"
+            md_msg += f"[📊 View Task Details & Results](/dashboard/task/{analysis_id})\n\n"
             if success:
-                md_msg += "Execution completed successfully! The generated files are saved in the tool's result directory. Please check the **Files** tab."
+                md_msg += "Execution completed successfully! Click the link above to view results and download files."
             else:
-                md_msg += "Execution failed. Please check the **Workflows** tab and click `✨ AI Diagnose` for details."
+                md_msg += "Execution failed. Click the link above to view logs and error details."
 
             msg = CopilotMessage(project_id=project_id, session_id=session_id, role="assistant", content=md_msg)
             session.add(msg)
@@ -232,6 +234,7 @@ def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, sessio
             f.write("\n\n🏁 Execution Finished.\n")
 
         print(f"📊 [Sandbox Task] Execution result: success={res['success']}, files={len(res.get('files', []))}", flush=True)
+        print(f"📊 [Sandbox Task] stdout length: {len(res.get('stdout', ''))}, stderr length: {len(res.get('stderr', ''))}", flush=True)
 
         with Session(engine) as db:
             analysis = db.get(Analysis, uuid.UUID(analysis_id))
@@ -241,15 +244,27 @@ def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, sessio
                 print(f"✅ [Sandbox Task] Updated analysis status to: {analysis.status}", flush=True)
             
             project = db.get(Project, uuid.UUID(project_id))
-            status_icon = "✅" if res['success'] else "❌"
-            md_msg = f"### {status_icon} Sandbox Analysis Finished (ID: `{analysis_id[:8]}`)\n\n"
+            status_icon = "✅" if res['success'] else "⚠️"
+            md_msg = f"### {status_icon} Sandbox Analysis Finished\n\n"
+            md_msg += f"**Task ID:** `{analysis_id[:8]}`\n\n"
+            md_msg += f"[📊 View Task Details & Results](/dashboard/task/{analysis_id})\n\n"
             
             attachments = []
             
             if res.get('files') and project:
                 md_msg += "**Generated Results:**\n\n"
-                attachments = _save_files_to_project(db, project_id, res['files'], res)
-                md_msg += "\n*(Files are stored in your **Files** tab)*\n\n"
+                try:
+                    attachments = _save_files_to_project(db, project_id, res['files'], res)
+                    # Add result previews
+                    for att in attachments:
+                        if att.get('type') == 'image':
+                            md_msg += f"![{att['name']}]({att.get('data', '')[:100]}...)\n\n"
+                        elif att.get('type') == 'table':
+                            md_msg += f"**Table: {att['name']}**\n```\n{att.get('preview', '')[:500]}\n```\n\n"
+                    md_msg += "\n*(Files are stored in your **Files** tab)*\n\n"
+                except Exception as save_err:
+                    print(f"❌ [Sandbox Task] Failed to save files: {save_err}", flush=True)
+                    md_msg += f"\n*(Warning: Failed to save some files: {save_err})*\n\n"
             
             if res.get('stdout'):
                 out = res['stdout'][:1000] + ('...' if len(res['stdout'])>1000 else '')
@@ -257,7 +272,14 @@ def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, sessio
                 
             if res.get('stderr'):
                 err = res['stderr'][:1000] + ('...' if len(res['stderr'])>1000 else '')
-                md_msg += f"\n**Error Detail:**\n```text\n{err}\n```\n"
+                md_msg += f"\n**Warnings/Errors:**\n```text\n{err}\n```\n"
+            
+            if res.get('error_classified'):
+                ec = res['error_classified']
+                md_msg += f"\n**Error Analysis:**\n"
+                md_msg += f"- Type: {ec.get('category', 'unknown')}\n"
+                md_msg += f"- Message: {ec.get('message', 'N/A')}\n"
+                md_msg += f"- Suggestion: {ec.get('suggestion', 'N/A')}\n"
 
             msg = CopilotMessage(
                 project_id=uuid.UUID(project_id), 
@@ -423,6 +445,7 @@ def run_task_chain(chain_id: str):
             db.commit()
             
             final_msg = f"### 🎉 Task Chain Completed!\n\n"
+            final_msg += f"**Chain ID:** `{chain_id[:8]}`\n\n"
             final_msg += f"**Strategy:** {chain.strategy or 'N/A'}\n\n"
             final_msg += f"**Steps Completed:** {total_steps}/{total_steps}\n\n"
             
@@ -430,7 +453,12 @@ def run_task_chain(chain_id: str):
                 final_msg += "**Generated Files:**\n"
                 for att in all_attachments:
                     final_msg += f"- 📄 `{att['name']}`\n"
-            
+                    # Add preview for images and tables
+                    if att.get('type') == 'image':
+                        final_msg += f"  ![{att['name']}]({att.get('data', '')[:100]}...)\n"
+                    elif att.get('type') == 'table':
+                        final_msg += f"  ```\n  {att.get('preview', '')[:300]}\n  ```\n"
+                final_msg += "\n*(Check the **Files** tab for all generated files)*\n"
             msg = CopilotMessage(
                 project_id=chain.project_id,
                 session_id=session_id,

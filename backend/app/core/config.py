@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     # === 基础配置 ===
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "Autonome Backend"
+    FRONTEND_URL: str = "http://localhost:3001"
     
     # === 数据库配置 ===
     DB_HOST: str = "db"

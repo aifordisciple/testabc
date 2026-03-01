@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 from datetime import datetime
 import json
@@ -109,6 +109,8 @@ def get_conversation(
     
     msg_list = []
     for msg in messages:
+        response_data = json.loads(msg.response_data) if msg.response_data else None
+        files_data = json.loads(msg.files) if msg.files else None
         msg_dict = {
             "id": str(msg.id),
             "conversation_id": str(msg.conversation_id),
@@ -116,11 +118,12 @@ def get_conversation(
             "content": msg.content,
             "created_at": msg.created_at.isoformat(),
             "response_mode": msg.response_mode,
-            "response_data": json.loads(msg.response_data) if msg.response_data else None,
-            "files": json.loads(msg.files) if msg.files else None
+            "response_data": response_data,
+            "plan_data": response_data,  # Alias for frontend compatibility
+            "files": files_data,
+            "attachments": files_data  # Alias for frontend compatibility
         }
         msg_list.append(msg_dict)
-    
     return ConversationDetail(
         id=conversation.id,
         project_id=conversation.project_id,
@@ -136,8 +139,8 @@ def get_conversation(
 @router.put("/conversations/{conversation_id}", response_model=ConversationPublic)
 def update_conversation(
     conversation_id: UUID,
-    title: str = None,
-    summary: str = None,
+    title: Optional[str] = None,
+    summary: Optional[str] = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
@@ -202,9 +205,9 @@ def add_message(
     conversation_id: UUID,
     role: str,
     content: str,
-    response_mode: str = None,
-    response_data: dict = None,
-    files: list = None,
+    response_mode: Optional[str] = None,
+    response_data: Optional[dict] = None,
+    files: Optional[list] = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
@@ -243,7 +246,9 @@ def add_message(
         created_at=message.created_at,
         response_mode=message.response_mode,
         response_data=json.loads(message.response_data) if message.response_data else None,
-        files=json.loads(message.files) if message.files else None
+        plan_data=json.loads(message.response_data) if message.response_data else None,
+        files=json.loads(message.files) if message.files else None,
+        attachments=json.loads(message.files) if message.files else None
     )
 
 @router.get("/conversations/{conversation_id}/messages", response_model=List[MessagePublic])
@@ -276,7 +281,158 @@ def get_messages(
             created_at=msg.created_at,
             response_mode=msg.response_mode,
             response_data=json.loads(msg.response_data) if msg.response_data else None,
-            files=json.loads(msg.files) if msg.files else None
+            plan_data=json.loads(msg.response_data) if msg.response_data else None,
+            files=json.loads(msg.files) if msg.files else None,
+            attachments=json.loads(msg.files) if msg.files else None
         )
         for msg in messages
     ]
+
+# Search endpoint
+@router.get("/projects/{project_id}/conversations/search")
+def search_conversations(
+    project_id: UUID,
+    q: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """搜索对话消息"""
+    project = session.get(Project, project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Search in conversation titles
+    conv_query = select(Conversation).where(
+        Conversation.project_id == project_id,
+        Conversation.title.ilike(f"%{q}%")
+    )
+    conversations = session.exec(conv_query).all()
+    
+    # Search in messages
+    msg_query = select(ConversationMessage).where(
+        ConversationMessage.content.ilike(f"%{q}%")
+    )
+    all_messages = session.exec(msg_query).all()
+    
+    # Filter messages by project conversations
+    conv_ids = {c.id for c in conversations}
+    filtered_messages = [m for m in all_messages if m.conversation_id in conv_ids]
+    
+    return {
+        "conversations": [
+            {"id": str(c.id), "title": c.title, "updated_at": c.updated_at.isoformat()}
+            for c in conversations
+        ],
+        "messages": [
+            {
+                "id": str(m.id),
+                "conversation_id": str(m.conversation_id),
+                "role": m.role,
+                "content": m.content[:200] + ("..." if len(m.content) > 200 else ""),
+                "created_at": m.created_at.isoformat()
+            }
+            for m in filtered_messages[:20]
+        ]
+    }
+
+
+# Update message
+@router.put("/messages/{message_id}")
+def update_message(
+    message_id: UUID,
+    content: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """更新消息内容"""
+    message = session.get(ConversationMessage, message_id)
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    
+    conversation = session.get(Conversation, message.conversation_id)
+    project = session.get(Project, conversation.project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    
+    message.content = content
+    session.add(message)
+    session.commit()
+    session.refresh(message)
+    
+    return MessagePublic(
+        id=message.id,
+        conversation_id=message.conversation_id,
+        role=message.role,
+        content=message.content,
+        created_at=message.created_at,
+        response_mode=message.response_mode,
+        response_data=json.loads(message.response_data) if message.response_data else None,
+        plan_data=json.loads(message.response_data) if message.response_data else None,
+        files=json.loads(message.files) if message.files else None,
+        attachments=json.loads(message.files) if message.files else None
+    )
+
+# Delete message
+@router.delete("/messages/{message_id}")
+def delete_message(
+    message_id: UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """删除消息"""
+    message = session.get(ConversationMessage, message_id)
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    
+    conversation = session.get(Conversation, message.conversation_id)
+    project = session.get(Project, conversation.project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    
+    session.delete(message)
+    session.commit()
+    
+    return {"status": "deleted"}
+
+# Export conversation
+@router.get("/conversations/{conversation_id}/export")
+def export_conversation(
+    conversation_id: UUID,
+    format: str = "markdown",
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """导出会话"""
+    conversation = session.get(Conversation, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    project = session.get(Project, conversation.project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    
+    messages = session.exec(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == conversation_id)
+        .order_by(ConversationMessage.created_at)
+    ).all()
+    
+    if format == "markdown":
+        md = f"# {conversation.title}\n\n"
+        md += f"*Created: {conversation.created_at} | Updated: {conversation.updated_at}*\n\n---\n\n"
+        for msg in messages:
+            role_emoji = "👤" if msg.role == "user" else "🤖"
+            md += f"### {role_emoji} {msg.role.capitalize()}\n\n"
+            md += msg.content + "\n\n"
+        
+        return {
+            "format": "markdown",
+            "content": md,
+            "filename": f"{conversation.title[:30]}.md"
+        }
+    
+    return {
+        "format": "markdown",
+        "content": "Export format not supported yet",
+        "filename": f"{conversation.title[:30]}.md"
+    }
