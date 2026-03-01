@@ -12,6 +12,17 @@ from app.models.bio import WorkflowTemplate
 
 class TemplateSaver:
     def __init__(self):
+        # Use unified llm_client singleton
+        from app.core.llm import get_llm_client
+        client = get_llm_client()
+        
+        self.base_url = client.config.base_url
+        self.api_key = client.config.api_key
+        self.model = client.config.model
+        self.client = client.raw_client
+        
+        print(f"💾 [TemplateSaver] Initialized with unified LLM client", flush=True)
+    def __init__(self):
         self.base_url = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")
         self.api_key = os.getenv("LLM_API_KEY", "ollama")
         self.model = os.getenv("LLM_MODEL", "qwen2.5-coder:32b")

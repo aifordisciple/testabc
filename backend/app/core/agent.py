@@ -14,6 +14,9 @@ MEDIUM_CONFIDENCE_THRESHOLD = 0.50
 MAX_TOOL_OPTIONS = 3
 
 def get_llm():
+    """获取 LangChain ChatOpenAI 客户端 (向后兼容函数)"""
+    from app.core.llm import get_llm_client
+    return get_llm_client().chat
     model = os.getenv("LLM_MODEL", "glm-5")
     base_url = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")
     api_key = os.getenv("LLM_API_KEY", "ollama")

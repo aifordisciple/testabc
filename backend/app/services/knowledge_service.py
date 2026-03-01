@@ -27,6 +27,20 @@ class LLMDatasetSearchResult(BaseModel):
 
 class KnowledgeService:
     def __init__(self):
+        # Use unified llm_client singleton
+        from app.core.llm import get_llm_client
+        client = get_llm_client()
+        
+        self.base_url = client.config.base_url
+        self.api_key = client.config.api_key
+        self.llm_model = client.config.model
+        self.embed_model = client.config.embed_model
+        
+        # Use singleton's clients
+        self.llm_client = client.raw_client
+        self.instructor_client = client.instructor_client
+        self.embed_client = client.embed_client
+    def __init__(self):
         self.base_url = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")
         self.api_key = os.getenv("LLM_API_KEY", "ollama")
         self.llm_model = os.getenv("LLM_MODEL", "qwen2.5-coder:32b")
@@ -88,6 +102,26 @@ class KnowledgeService:
             raise e
 
     # 👇 核心修复 2：升级为 混合检索 (Hybrid Search)
+    def semantic_search(self, db: Session, query: str, top_k: int = 5) -> List[PublicDataset]:
+        """混合本地检索：精准文本匹配 + 向量语义检索"""
+        query_str = query.strip()
+        
+        # 使用参数化查询替代 f-string，防止 SQL 注入
+        # 构建搜索模式（使用 Python 字符串格式化，然后在 SQLModel 中绑定参数）
+        search_pattern = f"%{query_str}%"
+        
+        # 1. 优先进行传统关系型数据库的文本精确/模糊匹配 (特别擅长抓取 GSE 编号或精确词汇)
+        # 使用参数化查询：.ilike() 支持传入参数
+        text_matches = db.exec(
+            select(PublicDataset)
+            .where(
+                or_(
+                    PublicDataset.accession.ilike(search_pattern),
+                    PublicDataset.title.ilike(search_pattern)
+                )
+            )
+            .limit(top_k)
+        ).all()
     def semantic_search(self, db: Session, query: str, top_k: int = 5) -> List[PublicDataset]:
         """混合本地检索：精准文本匹配 + 向量语义检索"""
         query_str = query.strip()

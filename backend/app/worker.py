@@ -224,7 +224,46 @@ def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, sessio
         log_file = os.path.join(work_dir, "analysis.log")
         with open(log_file, "w", encoding="utf-8") as f:
             f.write("🚀 Starting AI Custom Sandbox Execution...\n")
-            f.write("=" * 50 + "\nExecuting Code:\n" + custom_code + "\n" + "=" * 50 + "\n\n")
+        f.write("=" * 50 + "\nExecuting Code:\n" + custom_code + "\n" + "=" * 50 + "\n\n")
+
+        # Retry logic for sandbox execution
+        retry_count = 0
+        max_retries = 3
+        success = False
+        current_code = custom_code
+        
+        while retry_count < max_retries and not success:
+            res = sandbox_service.execute_python(project_id, SETUP_CODE + "\n" + current_code)
+            success = res['success']
+            
+            if not success and retry_count < max_retries - 1:
+                retry_count += 1
+                print(f"🔄 [Sandbox Task] Retrying ({retry_count}/{max_retries})...", flush=True)
+                
+                # Use LLM to analyze error and propose fix
+                try:
+                    from app.core.agent import analyze_error_and_fix
+                    import asyncio
+                    
+                    data_context = sandbox_service._get_data_context(project_id)
+                    fix_result = asyncio.run(analyze_error_and_fix(
+                        original_code=current_code,
+                        error_message=res.get('stderr', ''),
+                        stdout=res.get('stdout', ''),
+                        data_context=data_context,
+                        retry_count=retry_count,
+                        max_retries=max_retries
+                    ))
+                    
+                    current_code = fix_result.get('fixed_code', current_code)
+                    print(f"📝 [Sandbox Task] LLM suggested fix: {fix_result.get('analysis', 'N/A')[:100]}...", flush=True)
+                except Exception as fix_err:
+                    print(f"⚠️ [Sandbox Task] LLM fix failed: {fix_err}", flush=True)
+                    # Continue with original code on error
+        
+        if retry_count > 0:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"\n🔄 Retried {retry_count} time(s)\n")
             
         res = sandbox_service.execute_python(project_id, SETUP_CODE + "\n" + custom_code)
 

@@ -43,20 +43,20 @@ class WorkflowMatcher:
         "Pathway Analysis": ["pathway", "通路分析"],
     }
     
+    
     def __init__(self):
         # Use unified llm_client singleton
-        from app.core.llm import llm_client
+        from app.core.llm import get_llm_client
         
-        self.base_url = llm_client.base_url
-        self.api_key = llm_client.api_key
-        self.model = llm_client.model
+        client = get_llm_client()
+        self.base_url = client.config.base_url
+        self.api_key = client.config.api_key
+        self.model = client.config.model
+        self.embed_model = client.config.embed_model
         
-        embed_base_url = os.getenv("EMBED_BASE_URL", self.base_url)
-        embed_api_key = os.getenv("EMBED_API_KEY", self.api_key)
-        self.embed_model = os.getenv("EMBEDDING_MODEL", "nomic-embed-text:latest")
-        self.embed_client = OpenAI(base_url=embed_base_url, api_key=embed_api_key)
-        
-        print(f"🔗 [WorkflowMatcher] Initialized with unified LLM client", flush=True)
+        # Use singleton's embed client
+        self.embed_client = client.embed_client
+
     
     def get_embedding(self, text: str) -> List[float]:
         """获取文本的向量嵌入"""
@@ -98,6 +98,27 @@ class WorkflowMatcher:
             return []
         
         scored_matches = []
+        
+        # 预处理: 收集有embedding的模板
+        templates_with_embedding = {t.id: t.embedding for t in templates if t.embedding}
+        
+        for template in templates:
+            base_score, reason = self._calculate_match_score(intent, template)
+            
+            # 向量相似度加分
+            vector_boost = 0.0
+            if template.id in templates_with_embedding:
+                query_text = f"{intent.analysis_type} {' '.join(intent.keywords)}"
+                vec = templates_with_embedding[template.id]
+                sim = self._cosine_similarity(query_text, vec) if vec else 0.0
+                if sim > 0.5:
+                    vector_boost = min(0.3, (sim - 0.5) * 0.6)
+                    reason = f"{reason} | 向量:{sim:.2f}" if reason else f"向量相似度:{sim:.2f}"
+            
+            total_score = base_score + vector_boost
+            
+            if total_score > 0.3:
+                scored_matches.append((template, total_score, reason))
         
         for template in templates:
             score, reason = self._calculate_match_score(intent, template)
@@ -371,5 +392,25 @@ class WorkflowMatcher:
         except Exception as e:
             print(f"⚠️ [WorkflowMatcher] LLM inference error: {e}", flush=True)
             return self._infer_parameters(intent, template)
+    
+    def _cosine_similarity(self, text: str, embedding: List[float]) -> float:
+        """计算文本与向量的余弦相似度"""
+        if not embedding:
+            return 0.0
+        try:
+            vec = self.get_embedding(text)
+            if not vec:
+                return 0.0
+            dot = sum(a * b for a, b in zip(vec, embedding))
+            norm1 = sum(a * a for a in vec) ** 0.5
+            norm2 = sum(b * b for b in embedding) ** 0.5
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            return dot / (norm1 * norm2)
+        except Exception as e:
+            print(f"⚠️ Vector similarity error: {e}", flush=True)
+            return 0.0
+
+workflow_matcher = WorkflowMatcher()
 
 workflow_matcher = WorkflowMatcher()

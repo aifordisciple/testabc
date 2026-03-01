@@ -77,16 +77,21 @@ class ResetPasswordSchema(BaseModel):
 @router.post("/password-recovery/{email}")
 def recover_password(email: str):
     """
-    生成重置 Token 并打印在控制台 (模拟发送邮件)
+    生成重置 Token (模拟发送邮件)
+    注意：生产环境应使用真实的邮件服务
     """
+    import logging
+    
     reset_token = create_access_token(subject=email, expires_delta=timedelta(minutes=15))
     
     reset_link = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
     
-    print("\n" + "="*60)
-    print(f"📧 [MOCK EMAIL] To: {email}")
-    print(f"🔗 Click to reset: {reset_link}")
-    print("="*60 + "\n")
+    # 仅在调试模式下打印敏感信息
+    logger = logging.getLogger(__name__)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"Password reset token for {email}: {reset_link}")
+    else:
+        logger.info(f"Password reset email sent to {email}")
     
     return {"msg": "Password recovery email sent"}
 

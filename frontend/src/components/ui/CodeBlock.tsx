@@ -18,9 +18,10 @@ import { toast } from '@/components/ui/Toast';
 interface CodeBlockProps {
   code: string;
   language?: string;
+  showLineNumbers?: boolean;
 }
 
-export function CodeBlock({ code, language = 'python' }: CodeBlockProps) {
+export function CodeBlock({ code, language = 'python', showLineNumbers = true }: CodeBlockProps) {
   const codeRef = useRef<HTMLElement>(null);
   const [copied, setCopied] = useState(false);
 
@@ -50,6 +51,9 @@ export function CodeBlock({ code, language = 'python' }: CodeBlockProps) {
   };
   const normalizedLang = langMap[language.toLowerCase()] || language.toLowerCase();
 
+  // Split code into lines for line numbers
+  const lines = code.split('\n');
+
   return (
     <div className="relative group rounded-lg overflow-hidden bg-[#1e1e1e] my-2">
       <div className="flex items-center justify-between px-3 py-1.5 bg-[#2d2d2d] border-b border-[#3d3d3d]">
@@ -62,11 +66,22 @@ export function CodeBlock({ code, language = 'python' }: CodeBlockProps) {
           {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
         </button>
       </div>
-      <pre className="!m-0 !rounded-t-none overflow-x-auto">
-        <code ref={codeRef} className={`language-${normalizedLang}`}>
-          {code}
-        </code>
-      </pre>
+      <div className="flex overflow-x-auto">
+        {showLineNumbers && lines.length > 1 && (
+          <div className="flex-shrink-0 py-3 px-3 bg-[#1e1e1e] border-r border-[#3d3d3d] select-none text-right">
+            {lines.map((_, i) => (
+              <div key={i} className="text-xs text-gray-600 leading-5 font-mono">
+                {i + 1}
+              </div>
+            ))}
+          </div>
+        )}
+        <pre className={`!m-0 !rounded-t-none overflow-x-auto flex-1 ${showLineNumbers && lines.length > 1 ? '' : 'px-3'}`}>
+          <code ref={codeRef} className={`language-${normalizedLang}`}>
+            {code}
+          </code>
+        </pre>
+      </div>
     </div>
   );
 }

@@ -6,7 +6,6 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import UploadModal from '@/components/UploadModal';
 import SampleManager from '@/components/SampleManager';
 import AnalysisManager from '@/components/AnalysisManager';
-import CopilotPanel from '@/components/CopilotPanel'; 
 import ConfirmModal from '@/components/ConfirmModal';
 import InputModal from '@/components/InputModal';
 import { toast } from '@/components/ui/Toast';
@@ -16,7 +15,7 @@ import { Card, CardContent } from '@/components/ui/Card';
 import { AnimatedTabsUnderline } from '@/components/ui/animated-tabs';
 import { 
   X, Folder, FileText, Download, Share2, Pencil, Link2Off, Trash2, 
-  FolderPlus, Upload, ChevronRight, Bot, Maximize2, Minimize2
+  FolderPlus, Upload, ChevronRight, Maximize2, Minimize2
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -103,7 +102,7 @@ interface ProjectWorkspaceProps { projectId: string; onBack?: () => void; isActi
 
 export default function ProjectWorkspace({ projectId, onBack, isActive = true }: ProjectWorkspaceProps) {
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'files' | 'samples' | 'workflow' | 'copilot'>('files');
+  const [activeTab, setActiveTab] = useState<'files' | 'samples' | 'workflow'>('files');
   const [fullscreen, setFullscreen] = useState(false);
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
@@ -275,7 +274,6 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
     { id: 'files', label: 'Files' },
     { id: 'samples', label: 'Samples' },
     { id: 'workflow', label: 'Workflow' },
-    { id: 'copilot', label: 'Bio-Copilot' },
   ];
 
   const displayTabs = tabs;
@@ -535,28 +533,6 @@ export default function ProjectWorkspace({ projectId, onBack, isActive = true }:
           )}>
             <AnalysisManager projectId={projectId} isActive={isActive && activeTab === 'workflow'} />
           </div>
-        )}
-        
-        {activeTab === 'copilot' && (
-          <div className={cn(
-            "animate-in fade-in slide-in-from-bottom-2 duration-300 flex-1 h-full"
-          )}>
-            <CopilotPanel 
-              projectId={projectId} 
-              fullscreen={fullscreen}
-              onToggleFullscreen={() => setFullscreen(!fullscreen)}
-            />
-          </div>
-        )}
-
-        {/* Floating Copilot Button for Mobile */}
-        {!fullscreen && typeof window !== 'undefined' && window.innerWidth < 768 && activeTab !== 'copilot' && (
-          <Button
-            className="fixed bottom-6 right-6 rounded-full w-14 h-14 shadow-lg bg-primary hover:bg-primary/90 z-40 touch-target-min"
-            onClick={() => { setActiveTab('copilot'); setFullscreen(true); }}
-          >
-            <Bot className="w-6 h-6" />
-          </Button>
         )}
       </div>
 

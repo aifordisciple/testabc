@@ -8,6 +8,7 @@ type Theme = 'light' | 'dark' | 'system';
 interface ThemeState {
   theme: Theme;
   setTheme: (theme: Theme) => void;
+  toggleTheme: () => void;
   resolvedTheme: 'light' | 'dark';
 }
 
@@ -65,6 +66,12 @@ export const useThemeStore = create<ThemeState>()(
           }
         }
       },
+
+      toggleTheme: () => {
+        const { resolvedTheme } = get();
+        const newTheme = resolvedTheme === 'dark' ? 'light' : 'dark';
+        get().setTheme(newTheme);
+      },
     }),
     {
       name: 'autonome-theme',
@@ -92,8 +99,8 @@ export const useThemeStore = create<ThemeState>()(
 );
 
 export function useTheme() {
-  const { theme, setTheme, resolvedTheme } = useThemeStore();
-  return { theme, setTheme, resolvedTheme };
+  const { theme, setTheme, resolvedTheme, toggleTheme } = useThemeStore();
+  return { theme, setTheme, resolvedTheme, toggleTheme };
 }
 
 export function initTheme() {

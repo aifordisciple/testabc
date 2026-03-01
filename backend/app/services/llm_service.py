@@ -4,6 +4,14 @@ from app.core.config import settings
 
 class LLMService:
     def __init__(self):
+        # Use unified llm_client singleton for async client
+        from app.core.llm import get_llm_client
+        client = get_llm_client()
+        
+        self.client = client.async_client
+        self.default_model = client.config.model
+        self.default_temp = 0.1  # Default temperature
+    def __init__(self):
         # 初始化异步客户端
         self.client = AsyncOpenAI(
             base_url=settings.LLM_BASE_URL,

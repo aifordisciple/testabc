@@ -92,13 +92,12 @@ class IntentParser:
         # Use unified llm_client singleton
         from app.core.llm import llm_client
         
-        self.client = llm_client.client
+        self.client = llm_client.instructor_client
         self.raw_client = llm_client.raw_client
-        self.model = llm_client.model
-        self.base_url = llm_client.base_url
-        self.api_key = llm_client.api_key
-        
-        print(f"🧠 [IntentParser] Initialized with model: {self.model}", flush=True)
+        self.model = llm_client.config.model
+        self.base_url = llm_client.config.base_url
+        self.api_key = llm_client.config.api_key
+
     
     def _detect_query_intent(self, user_input: str) -> Optional[str]:
         """快速检测是否为查询意图"""
@@ -211,6 +210,13 @@ class IntentParser:
             )
     
     def get_embedding(self, text: str) -> List[float]:
+        """获取文本的向量嵌入 (使用统一客户端)"""
+        try:
+            from app.core.llm import get_llm_client
+            return get_llm_client().get_embedding(text)
+        except Exception as e:
+            print(f"⚠️ [IntentParser] Embedding error: {e}", flush=True)
+            return []
         """获取文本的向量嵌入"""
         embed_base_url = os.getenv("EMBED_BASE_URL", self.base_url)
         embed_api_key = os.getenv("EMBED_API_KEY", self.api_key)

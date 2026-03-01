@@ -3,24 +3,25 @@ import uuid
 import subprocess
 import shutil
 import base64
-import pickle
+import json
 from typing import Dict, Any, Optional
 
 from app.core.error_classifier import error_classifier
 
-CONTEXT_FILE = ".context.pkl"
+CONTEXT_FILE = ".context.json"
 
+# JSON-based context restore code (replaces pickle for security)
 CONTEXT_RESTORE_CODE = """
-import pickle
+import json
 import os as _os
 
-_CONTEXT_FILE = '/workspace/.context.pkl'
+_CONTEXT_FILE = '/workspace/.context.json'
 
 def _load_context():
     if _os.path.exists(_CONTEXT_FILE):
         try:
-            with open(_CONTEXT_FILE, 'rb') as _f:
-                return pickle.load(_f)
+            with open(_CONTEXT_FILE, 'r') as _f:
+                return json.load(_f)
         except Exception as _e:
             print(f"[Context] Failed to load: {_e}")
     return {}
@@ -29,8 +30,8 @@ def _save_context(**kwargs):
     try:
         existing = _load_context()
         existing.update(kwargs)
-        with open(_CONTEXT_FILE, 'wb') as _f:
-            pickle.dump(existing, _f)
+        with open(_CONTEXT_FILE, 'w') as _f:
+            json.dump(existing, _f)
         print(f"[Context] Saved: {list(kwargs.keys())}")
     except Exception as _e:
         print(f"[Context] Failed to save: {_e}")
@@ -45,6 +46,38 @@ class SandboxService:
         self.upload_root = os.getenv("UPLOAD_ROOT", "/data/uploads")
         self.host_upload_root = os.getenv("HOST_UPLOAD_ROOT", self.upload_root)
         self.sandbox_image = "autonome-tool-env:latest"
+
+    @staticmethod
+    def _filter_serializable(obj):
+        """
+        Recursively filter objects to only include JSON-serializable types.
+        This prevents issues with non-serializable objects in context.
+        """
+        if isinstance(obj, dict):
+            return {k: SandboxService._filter_serializable(v) for k, v in obj.items() if SandboxService._is_serializable(v)}
+        elif isinstance(obj, list):
+            return [SandboxService._filter_serializable(i) for i in obj if SandboxService._is_serializable(obj)]
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        elif isinstance(obj, (tuple, set)):
+            return list(obj)  # Convert to list
+        elif isinstance(obj, bytes):
+            return obj.decode('utf-8', errors='replace')  # Decode bytes to string
+        else:
+            return str(obj)  # Convert other types to string
+
+    @staticmethod
+    def _is_serializable(obj) -> bool:
+        """Check if an object is JSON-serializable"""
+        if obj is None:
+            return True
+        if isinstance(obj, (str, int, float, bool)):
+            return True
+        if isinstance(obj, (dict, list, tuple, set)):
+            return True
+        if isinstance(obj, (bytes, bytearray)):
+            return True
+        return False
 
     def execute_python(
         self, 
@@ -118,8 +151,8 @@ class SandboxService:
             context_output_path = os.path.join(container_workspace_dir, CONTEXT_FILE)
             if os.path.exists(context_output_path):
                 try:
-                    with open(context_output_path, "rb") as f:
-                        output_context = pickle.load(f)
+                    with open(context_output_path, "r", encoding="utf-8") as f:
+                        output_context = json.load(f)
                     print(f"📤 [Sandbox] Saved context with {len(output_context)} variables", flush=True)
                     
                     context_dest = os.path.join(container_project_dir, CONTEXT_FILE)

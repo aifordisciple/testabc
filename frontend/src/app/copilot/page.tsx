@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
@@ -15,7 +15,7 @@ import {
   FlaskConical, Check, ClipboardCheck, Play, Send, X, Download, 
   Trash2, Plus, FolderOpen, FileText, Activity, Settings,
   PanelLeftClose, PanelLeft, MessageSquare, Sparkles, Upload, Search,
-  Edit2, Copy, CheckCircle2, FileDown, ChevronDown, CornerDownLeft, Mic, MicOff, FileUp, BookOpen, Wrench, Database, HelpCircle, Square
+  Edit2, Copy, CheckCircle2, FileDown, ChevronDown, CornerDownLeft, Mic, MicOff, FileUp, BookOpen, Wrench, Database, HelpCircle, Square, Zap
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -84,7 +84,8 @@ export default function CopilotPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [streamingContent, setStreamingContent] = useState('');
   const [streamingPlan, setStreamingPlan] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -97,6 +98,7 @@ export default function CopilotPage() {
   // Message editing state
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingMessageContent, setEditingMessageContent] = useState('');
+  const [showSavedIndicator, setShowSavedIndicator] = useState(false);
   
   // Slash command state
   const [showSlashMenu, setShowSlashMenu] = useState(false);
@@ -270,6 +272,27 @@ export default function CopilotPage() {
       }
     }
   }, []);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl/Cmd + Enter to send
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        if (input.trim() || attachments.length > 0) {
+          e.preventDefault();
+          handleSendStream(e as any);
+        }
+      }
+      // Escape to close menus
+      if (e.key === 'Escape') {
+        setShowSlashMenu(false);
+        setShowModelMenu(false);
+      }
+    };
+    
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [input, attachments, isLoading]);
   
   const toggleVoiceInput = () => {
     if (!recognition) return;
@@ -364,7 +387,30 @@ export default function CopilotPage() {
 
   const handleSendStream = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() && attachments.length === 0 || isLoading || !selectedProjectId || !currentSessionId) return;
+    if (!input.trim() && attachments.length === 0 || isLoading || !selectedProjectId) return;
+    
+    // Auto-create session if not exists
+    let sessionId = currentSessionId;
+    if (!sessionId && selectedProjectId && input.trim()) {
+      try {
+        const token = localStorage.getItem('token');
+        const createRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/ai/projects/${selectedProjectId}/chat/sessions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ title: input.slice(0, 30) })
+        });
+        if (createRes.ok) {
+          const sessionData = await createRes.json();
+          sessionId = sessionData.id;
+          setCurrentSessionId(sessionId);
+          refetchSessions();
+        }
+      } catch (err) {
+        console.error('Failed to create session:', err);
+      }
+    }
+    
+    if (!sessionId) return;
 
     const userMsg = input;
     const attachmentUrls = await uploadAttachments();
@@ -388,7 +434,7 @@ export default function CopilotPage() {
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
           body: JSON.stringify({ 
             message: userMsg, 
-            session_id: currentSessionId,
+            session_id: sessionId || currentSessionId,
             project_id: selectedProjectId
           })
         }
@@ -447,11 +493,18 @@ export default function CopilotPage() {
                     });
                   }
                   setStreamingContent('');
-                  setStreamingPlan(null);
                   setPendingUserMessage(null);
+                  // Show saved indicator
+                  setShowSavedIndicator(true);
+                  setTimeout(() => setShowSavedIndicator(false), 2000);
                   break;
                 case 'error':
-                  toast.error(data.message || 'An error occurred');
+                  const errMsg = data.message || 'An error occurred';
+                  toast.error(errMsg);
+                  setErrorMessage(errMsg);
+                  setStreamingContent('');
+                  setPendingUserMessage(null);
+                  break;
                   setStreamingContent('');
                   setPendingUserMessage(null);
                   break;
@@ -603,24 +656,7 @@ export default function CopilotPage() {
 
     return (
       <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-        <div className={`max-w-[90%] md:max-w-[85%] rounded-2xl px-3 md:px-4 py-2 md:py-3 ${msg.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-card border'} group relative`}>
-          {/* Message actions */}
-          <div className={`absolute top-2 ${msg.role === 'user' ? 'right-2' : 'left-2'} opacity-0 group-hover:opacity-100 transition-opacity flex gap-1`}>
-            <button onClick={handleCopy} className="p-1.5 rounded-md hover:bg-black/10 dark:hover:bg-white/10" title={locale === 'zh' ? '复制' : 'Copy'}>
-              <Copy className="w-3.5 h-3.5" />
-            </button>
-            {msg.role === 'user' && msg.id && (
-              <>
-                <button onClick={() => handleEditMessage(msg.id, msg.content)} className="p-1.5 rounded-md hover:bg-black/10 dark:hover:bg-white/10" title={locale === 'zh' ? '编辑' : 'Edit'}>
-                  <Edit2 className="w-3.5 h-3.5" />
-                </button>
-                <button onClick={() => handleDeleteMessage(msg.id)} className="p-1.5 rounded-md hover:bg-red-500/20" title={locale === 'zh' ? '删除' : 'Delete'}>
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </>
-            )}
-          </div>
-
+        <div className={`max-w-[90%] md:max-w-[85%] rounded-2xl px-4 md:px-5 py-3 md:py-4 ${msg.role === 'user' ? 'bg-blue-600 text-white shadow-md' : 'bg-white dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 text-gray-800 dark:text-gray-100 shadow-sm'}`}>
           {isEditing ? (
             <div className="space-y-2">
               <textarea
@@ -658,14 +694,37 @@ export default function CopilotPage() {
             </div>
           )}
           {msg.plan_data && renderPlanCard(msg.plan_data)}
+          {/* Timestamp */}
+          <div className={`text-[11px] mt-2 ${msg.role === 'user' ? 'text-blue-100 text-right' : 'text-gray-400'}`}>
+            {msg.created_at ? new Date(msg.created_at).toLocaleString() : ''}
+          </div>
+          {/* Message actions below */}
+          <div className={`flex gap-3 mt-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'} text-xs`}>
+            <button onClick={handleCopy} className="p-1.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-1 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200" title={locale === 'zh' ? '复制' : 'Copy'}>
+              <Copy className="w-3 h-3" /> {locale === 'zh' ? '复制' : 'Copy'}
+            </button>
+            {msg.role === 'user' && msg.id && (
+              <>
+                <button onClick={() => handleEditMessage(msg.id, msg.content)} className="p-1.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-1 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200" title={locale === 'zh' ? '编辑' : 'Edit'}>
+                  <Edit2 className="w-3 h-3" /> {locale === 'zh' ? '编辑' : 'Edit'}
+                </button>
+                <button onClick={() => handleDeleteMessage(msg.id)} className="p-1.5 rounded-md hover:bg-red-500/10 flex items-center gap-1 text-gray-400 dark:text-gray-500 hover:text-red-500" title={locale === 'zh' ? '删除' : 'Delete'}>
+                  <Trash2 className="w-3 h-3" /> {locale === 'zh' ? '删除' : 'Delete'}
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </div>
     );
   };
 
-  // Filter sessions based on search
-  const filteredSessions = sessions.filter(s => 
-    s.title.toLowerCase().includes(searchQuery.toLowerCase())
+  // Filter sessions based on search (memoized)
+  const filteredSessions = useMemo(() => 
+    sessions.filter(s => 
+      s.title.toLowerCase().includes(searchQuery.toLowerCase())
+    ),
+    [sessions, searchQuery]
   );
 
   return (
@@ -832,7 +891,9 @@ export default function CopilotPage() {
             <Button variant="ghost" size="icon" onClick={() => setSidebarOpen(!sidebarOpen)} className="flex-shrink-0">
               {sidebarOpen ? <PanelLeftClose className="w-4 md:w-5 h-4 md:h-5" /> : <PanelLeft className="w-4 md:w-5 h-4 md:h-5" />}
             </Button>
-            <h3 className="font-bold text-sm md:text-base truncate">Bio-Copilot</h3>
+            <h3 className="font-bold text-sm md:text-base truncate">
+              {currentSessionId ? sessions.find(s => s.id === currentSessionId)?.title || 'Chat' : 'Bio-Copilot'}
+            </h3>
             {selectedProjectId && <Badge variant="outline" className="hidden sm:inline-flex text-xs">{projectList.find(p => p.id === selectedProjectId)?.name}</Badge>}
           </div>
           <div className="flex items-center gap-1 md:gap-2">
@@ -907,6 +968,17 @@ export default function CopilotPage() {
             </>
           )}
           <div ref={messagesEndRef} />
+          {showSavedIndicator && (
+            <div className="text-center py-2 text-xs text-muted-foreground animate-fade-in">
+              ✓ Saved
+            </div>
+          )}
+          {errorMessage && (
+            <div className="text-center py-2 text-xs text-red-500 bg-red-50 dark:bg-red-900/20 rounded-lg mx-2">
+              ⚠️ {errorMessage}
+              <button onClick={() => setErrorMessage(null)} className="ml-2 underline">✕</button>
+            </div>
+          )}
         </div>
 
         {/* Slash Command Menu */}
@@ -940,7 +1012,7 @@ export default function CopilotPage() {
               {attachments.map((att, idx) => (
                 <div key={idx} className="relative group flex items-center gap-2 bg-secondary rounded-lg px-3 py-1.5">
                   {att.preview ? (
-                    <img src={att.preview} alt="attachment" className="w-8 h-8 object-cover rounded" />
+                    <img src={att.preview} alt="attachment" loading="lazy" className="w-8 h-8 object-cover rounded" />
                   ) : (
                     <FileText className="w-4 h-4 text-muted-foreground" />
                   )}
@@ -976,7 +1048,9 @@ export default function CopilotPage() {
               <textarea
                 ref={inputRef}
                 value={input}
-                placeholder={locale === 'zh' ? '向 AI 提问...' : 'Ask AI...'}
+                placeholder={locale === 'zh' 
+                  ? '尝试: "帮我分析RNA-seq数据" 或 "创建新项目" (Ctrl+Enter发送)' 
+                  : 'Try: "Analyze RNA-seq data" or "Create new project" (Ctrl+Enter)'}
                 onChange={(e) => {
                   const val = e.target.value;
                   setInput(val);
@@ -996,8 +1070,11 @@ export default function CopilotPage() {
                 }}
                 className="w-full bg-transparent text-foreground py-3 pl-12 pr-24 rounded-2xl outline-none resize-none text-sm min-h-[52px] max-h-[200px] placeholder:text-muted-foreground"
                 rows={1}
-                disabled={!selectedProjectId || !currentSessionId}
+                disabled={!selectedProjectId}
               />
+              {input.length > 0 && (
+                <span className="absolute bottom-1 right-16 text-[10px] text-muted-foreground opacity-50">{input.length}</span>
+              )}
               
               {/* Right action buttons */}
               <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
@@ -1025,9 +1102,9 @@ export default function CopilotPage() {
                 ) : (
                   <button 
                     type="submit" 
-                    disabled={(!input.trim() && attachments.length === 0) || !selectedProjectId || !currentSessionId}
+                    disabled={(!input.trim() && attachments.length === 0) || !selectedProjectId}
                     className={`p-2.5 rounded-full transition-all hover:scale-105 active:scale-95 ${
-                      (input.trim() || attachments.length > 0) && selectedProjectId && currentSessionId
+                      (input.trim() || attachments.length > 0) && selectedProjectId
                         ? 'bg-primary text-primary-foreground hover:bg-primary/90'
                         : 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'
                     }`}
@@ -1051,9 +1128,9 @@ export default function CopilotPage() {
               ) : (
                 <button 
                   type="submit" 
-                  disabled={(!input.trim() && attachments.length === 0) || !selectedProjectId || !currentSessionId}
+                  disabled={(!input.trim() && attachments.length === 0) || !selectedProjectId}
                   className={`absolute right-3 top-1/2 -translate-y-1/2 p-2.5 rounded-xl transition-all hover:scale-105 active:scale-95 ${
-                    (input.trim() || attachments.length > 0) && selectedProjectId && currentSessionId
+                    (input.trim() || attachments.length > 0) && selectedProjectId
                       ? 'bg-primary text-primary-foreground hover:bg-primary/90'
                       : 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'
                   }`}

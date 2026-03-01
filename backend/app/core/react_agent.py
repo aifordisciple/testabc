@@ -18,6 +18,9 @@ from app.models.bio import WorkflowTemplate
 
 
 def get_llm():
+    """获取 LangChain ChatOpenAI 客户端 (向后兼容函数)"""
+    from app.core.llm import get_llm_client
+    return get_llm_client().chat
     """Get LLM client with tool calling support"""
     model = os.getenv("LLM_MODEL", "qwen2.5-coder:32b")
     base_url = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")

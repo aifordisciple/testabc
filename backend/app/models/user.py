@@ -58,6 +58,9 @@ class SampleSheetBase(SQLModel):
 
 class SampleSheet(SampleSheetBase, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    project_id: uuid.UUID = Field(foreign_key="project.id", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     project_id: uuid.UUID = Field(foreign_key="project.id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
@@ -149,6 +152,9 @@ class SampleBase(SQLModel):
 
 class Sample(SampleBase, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    sample_sheet_id: uuid.UUID = Field(foreign_key="samplesheet.id", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     sample_sheet_id: uuid.UUID = Field(foreign_key="samplesheet.id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
@@ -175,6 +181,19 @@ class AnalysisBase(SQLModel):
     params_json: str = Field(default="{}")
 
 class Analysis(AnalysisBase, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    project_id: uuid.UUID = Field(foreign_key="project.id", index=True)
+    
+    sample_sheet_id: Optional[uuid.UUID] = Field(default=None, foreign_key="samplesheet.id", index=True)
+
+    status: str = Field(default="pending", index=True) 
+    nextflow_run_name: Optional[str] = None 
+    pid: Optional[int] = None 
+    
+    work_dir: Optional[str] = None 
+    out_dir: Optional[str] = None 
+    
+    start_time: datetime = Field(default_factory=datetime.utcnow, index=True)
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     project_id: uuid.UUID = Field(foreign_key="project.id")
     
@@ -237,7 +256,7 @@ class TaskChain(SQLModel, table=True):
     project_id: uuid.UUID = Field(foreign_key="project.id", index=True)
     session_id: str = Field(default="default", index=True)
     
-    status: str = Field(default="pending", description="pending/running/completed/failed")
+    status: str = Field(default="pending", description="pending/running/completed/failed", index=True)
     current_step: int = Field(default=0, description="当前执行到第几步")
     total_steps: int = Field(default=1, description="总步数")
     

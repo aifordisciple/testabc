@@ -286,6 +286,28 @@ def get_analysis_log(
             
     return {"log": "Log file waiting to be created..."}
 
+@router.get("/analyses/{analysis_id}/status")
+def get_analysis_status(
+    analysis_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    analysis = session.get(Analysis, analysis_id)
+    if not analysis:
+        raise HTTPException(404, "Analysis not found")
+    
+    project = session.get(Project, analysis.project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(403, "Permission denied")
+    
+    return {
+        "id": str(analysis.id),
+        "status": analysis.status,
+        "start_time": analysis.start_time.isoformat() if analysis.start_time else None,
+        "end_time": analysis.end_time.isoformat() if analysis.end_time else None,
+        "workflow": analysis.workflow
+    }
+
 @router.websocket("/analyses/{analysis_id}/ws/log")
 async def websocket_analysis_log(
     websocket: WebSocket,

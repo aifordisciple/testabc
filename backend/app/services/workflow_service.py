@@ -40,6 +40,59 @@ class WorkflowService:
         if not samples:
             raise ValueError("No samples found in this sheet")
 
+        # 优化：使用批量查询替代 N+1 查询
+        # 1. 获取所有样本的 ID
+        sample_ids = [s.id for s in samples]
+        
+        # 2. 一次性获取所有相关的 SampleFileLink
+        links = session.exec(
+            select(SampleFileLink).where(SampleFileLink.sample_id.in_(sample_ids))
+        ).all()
+        
+        # 3. 一次性获取所有相关的 File 记录
+        file_ids = [link.file_id for link in links]
+        files = session.exec(select(File).where(File.id.in_(file_ids))).all()
+        
+        # 4. 在内存中构建映射
+        file_map = {f.id: f for f in files}
+        links_by_sample = {}
+        for link in links:
+            if link.sample_id not in links_by_sample:
+                links_by_sample[link.sample_id] = []
+            links_by_sample[link.sample_id].append(link)
+        
+        rows = []
+        for sample in samples:
+            sample_links = links_by_sample.get(sample.id, [])
+            r1_path = ""
+            r2_path = ""
+            
+            for link in sample_links:
+                file_rec = file_map.get(link.file_id)
+                if not file_rec: continue
+                if not file_rec.s3_key: continue
+                    
+                abs_path = os.path.join(self.host_data_root, file_rec.s3_key)
+                
+                if link.file_role == "R1":
+                    r1_path = abs_path
+                elif link.file_role == "R2":
+                    r2_path = abs_path
+            
+            if r1_path:
+                rows.append({
+                    "sample_id": sample.name,
+                    "r1_path": r1_path,
+                    "r2_path": r2_path
+                })
+        sheet = session.get(SampleSheet, sample_sheet_id)
+        if not sheet:
+            raise ValueError(f"Sample sheet {sample_sheet_id} not found")
+
+        samples = session.exec(select(Sample).where(Sample.sample_sheet_id == sample_sheet_id)).all()
+        if not samples:
+            raise ValueError("No samples found in this sheet")
+
         rows = []
         for sample in samples:
             links = session.exec(select(SampleFileLink).where(SampleFileLink.sample_id == sample.id)).all()

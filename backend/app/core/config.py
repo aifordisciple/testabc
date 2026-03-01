@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     
     # === MinIO 配置 ===
     MINIO_ENDPOINT: str = "http://minio:9000"
+    MINIO_PUBLIC_ENDPOINT: str = ""  # 公网访问地址，用于生成 presigned URL。如果为空则使用 MINIO_ENDPOINT
+    MINIO_ROOT_USER: str = "admin"
+    MINIO_ROOT_PASSWORD: str = "Ehuoyi9171"
+    MINIO_CONSOLE_PORT: int = 9001
+    MINIO_BUCKET_NAME: str = "autonome"
+    MINIO_ENDPOINT: str = "http://minio:9000"
     MINIO_ROOT_USER: str = "admin"
     MINIO_ROOT_PASSWORD: str = "Ehuoyi9171"
     MINIO_CONSOLE_PORT: int = 9001
