@@ -15,11 +15,12 @@ import {
   FlaskConical, Check, ClipboardCheck, Play, Send, X, Download, 
   Trash2, Plus, FolderOpen, FileText, Activity, Settings,
   PanelLeftClose, PanelLeft, MessageSquare, Sparkles, Upload, Search,
-  Edit2, Copy, CheckCircle2, FileDown, ChevronDown, CornerDownLeft, Mic, MicOff, FileUp, BookOpen, Wrench, Database, HelpCircle, Square, Zap
+  Edit2, Copy, CheckCircle2, FileDown, ChevronDown, CornerDownLeft, Mic, MicOff, FileUp, BookOpen, Wrench, Database, HelpCircle, Square, Zap, Table, File, ChevronLeft, ChevronRight
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
+import { Lightbox } from '@/components/copilot/Lightbox';
 
 interface Project {
   id: string;
@@ -37,6 +38,15 @@ interface Session {
   message_count: number;
 }
 
+interface FileAttachment {
+  type: 'image' | 'table' | 'pdf' | 'text' | 'binary';
+  name: string;
+  data?: string; // base64 for images
+  preview?: string; // preview for tables
+  url?: string; // download URL
+  size?: number;
+}
+
 interface Message {
   id?: string;
   role: 'user' | 'assistant';
@@ -44,6 +54,8 @@ interface Message {
   created_at?: string;
   plan_data?: string;
   task_id?: string;
+  files?: FileAttachment[];
+  attachments?: FileAttachment[]; // Same as files
 }
 
 interface ModelInfo {
@@ -62,7 +74,6 @@ const DEFAULT_MODELS: ModelInfo[] = [
   { id: 'deepseek-r1:70b', name: 'DeepSeek R1 70B', provider: 'Ollama', description: 'Advanced reasoning', supports_streaming: true, supports_vision: false, max_tokens: 64000 },
   { id: 'qwen2.5:72b', name: 'Qwen 2.5 72B', provider: 'Ollama', description: 'Excellent Chinese support', supports_streaming: true, supports_vision: false, max_tokens: 32000 },
 ];
-
 
 // Prompt templates
 const promptTemplates = [
@@ -84,7 +95,7 @@ export default function CopilotPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [input, setInput] = useState('');
-const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [streamingContent, setStreamingContent] = useState('');
   const [streamingPlan, setStreamingPlan] = useState<string | null>(null);
@@ -121,6 +132,11 @@ const [isLoading, setIsLoading] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const [attachments, setAttachments] = useState<{ file: File; preview?: string }[]>([]);
+  
+  // Lightbox state
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxImages, setLightboxImages] = useState<{src: string; alt: string}[]>([]);
+  const [lightboxIndex, setLightboxIndex] = useState(0);
   
   const { resolvedTheme } = useTheme();
   const { locale } = useLocale();
@@ -230,12 +246,21 @@ const [isLoading, setIsLoading] = useState(false);
     }
   }, [sessions, currentSessionId]);
 
-  // Auto-create session when all sessions are deleted
+  // Auto-create session when all sessions are deleted (only after initial load)
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  
   useEffect(() => {
-    if (selectedProjectId && sessions.length === 0 && !currentSessionId && !createSessionMutation.isPending) {
+    if (sessions.length > 0) {
+      setSessionsLoaded(true);
+    }
+  }, [sessions.length]);
+
+  useEffect(() => {
+    // Only auto-create when sessions have been loaded and are empty
+    if (selectedProjectId && sessionsLoaded && sessions.length === 0 && !currentSessionId && !createSessionMutation.isPending) {
       createSessionMutation.mutate(locale === 'zh' ? '新对话' : 'New Chat');
     }
-  }, [selectedProjectId, sessions.length, currentSessionId, createSessionMutation.isPending, locale]);
+  }, [selectedProjectId, sessionsLoaded, sessions.length, currentSessionId, createSessionMutation.isPending, locale]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -512,9 +537,6 @@ const [isLoading, setIsLoading] = useState(false);
                   setStreamingContent('');
                   setPendingUserMessage(null);
                   break;
-                  setStreamingContent('');
-                  setPendingUserMessage(null);
-                  break;
               }
             } catch {}
           }
@@ -537,7 +559,7 @@ const [isLoading, setIsLoading] = useState(false);
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ plan_data: plan, session_id: currentSessionId })
+        body: JSON.stringify({ plan_data: plan, session_id: currentSessionId, conversation_id: currentSessionId })
       });
       
       if (!res.ok) throw new Error('Failed');
@@ -545,10 +567,33 @@ const [isLoading, setIsLoading] = useState(false);
       const result = await res.json();
       toast.success(locale === 'zh' ? '任务已提交！' : 'Task submitted!', { id: toastId });
       
-      // Navigate to task detail page
-      if (result.analysis_id) {
-        router.push(`/dashboard/task/${result.analysis_id}`);
+      // Immediately add a task card message to the chat
+      if (result.task_link && result.analysis_id) {
+        const taskCardMsg = {
+          id: `task-${Date.now()}`,
+          role: 'assistant' as const,
+          content: `🚀 **Task Submitted!**\n\nTask ID: \`${result.analysis_id.substring(0, 8)}\`\n\n[📊 View Task Details](${result.task_link})\n\nI will notify you when it's done!`,
+          created_at: new Date().toISOString()
+        };
+        queryClient.setQueryData<Message[]>(['session-messages', currentSessionId], (old: Message[] | undefined) => {
+          return [...(old || []), taskCardMsg];
+        });
       }
+      
+      // Refresh messages to show task link
+      refetchMessages();
+      
+      // Poll for task completion to refresh messages
+      let pollCount = 0;
+      const pollInterval = setInterval(() => {
+        pollCount++;
+        refetchMessages();
+        // Stop polling after 30 seconds
+        // Extended polling to 5 minutes for long-running tasks
+        if (pollCount >= 600) {
+          clearInterval(pollInterval);
+        }
+      }, 500);
     } catch (e: any) {
       toast.error(e.message || (locale === 'zh' ? '提交失败' : 'Submission failed'), { id: toastId });
     }
@@ -658,7 +703,26 @@ const [isLoading, setIsLoading] = useState(false);
       await navigator.clipboard.writeText(msg.content);
       toast.success(locale === 'zh' ? '已复制' : 'Copied');
     };
-
+    
+    const handleFilePreview = (file: FileAttachment) => {
+      if (file.type === 'image' && file.data) {
+        // Collect all images from this message's attachments for the lightbox
+        const imageFiles = msg.files?.filter((f: FileAttachment) => f.type === 'image' && f.data) || [];
+        const images = imageFiles.map((f: FileAttachment) => ({
+          src: f.data!,
+          alt: f.name
+        }));
+        const clickedIndex = images.findIndex((img: {src: string}) => img.src === file.data);
+        
+        setLightboxImages(images);
+        setLightboxIndex(clickedIndex >= 0 ? clickedIndex : 0);
+        setLightboxOpen(true);
+      } else if (file.type === 'table' && file.preview) {
+        alert(file.preview);
+      } else {
+        toast.info(locale === 'zh' ? `文件: ${file.name}` : `File: ${file.name}`);
+      }
+    };
     const isEditing = editingMessageId === msg.id;
 
     return (
@@ -693,6 +757,25 @@ const [isLoading, setIsLoading] = useState(false);
                       return <CodeBlock code={code} language={match[1]} />;
                     }
                     return <code className={className} {...props}>{children}</code>;
+                  },
+                  img({ node, src, alt, ...props }: any) {
+                    // Handle base64 images and regular image URLs
+                    if (src && (src.startsWith('data:image') || src.startsWith('http') || src.startsWith('/'))) {
+                      return (
+                        <img 
+                          src={src} 
+                          alt={alt || 'image'} 
+                          className="max-w-full h-auto rounded-lg my-2" 
+                          loading="lazy"
+                          onError={(e) => {
+                            console.error('Image load error:', src?.substring(0, 50));
+                            (e.target as HTMLImageElement).style.display = 'none';
+                          }}
+                          {...props} 
+                        />
+                      );
+                    }
+                    return null;
                   }
                 }}
               >
@@ -701,26 +784,52 @@ const [isLoading, setIsLoading] = useState(false);
             </div>
           )}
           {msg.plan_data && renderPlanCard(msg.plan_data)}
+          
+          {/* Files/Attachments display */}
+          {msg.files && msg.files.length > 0 && (
+            <div className="mt-3 border border-gray-600/50 rounded-lg p-2 bg-gray-800/30">
+              <div className="flex items-center gap-2 mb-2">
+                <File className="w-4 h-4 text-gray-400" />
+                <span className="text-xs font-medium text-gray-400">
+                  {locale === 'zh' ? '附件' : 'Attachments'} ({msg.files.length})
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                {msg.files.map((file: FileAttachment, idx: number) => (
+                  <div 
+                    key={idx} 
+                    className="bg-gray-700/50 rounded-lg overflow-hidden group hover:bg-gray-600 cursor-pointer transition-all"
+                    onClick={() => handleFilePreview(file)}
+                  >
+                    {file.type === 'image' && file.data ? (
+                      <img
+                        src={file.data}
+                        alt={file.name}
+                        className="max-w-full h-20 object-cover cursor-pointer"
+                      />
+                    ) : file.type === 'pdf' ? (
+                      <div className="flex items-center justify-center p-2 bg-red-500/20 rounded-lg h-20">
+                        <File className="w-4 h-4 text-red-400" />
+                        <span className="text-xs text-red-400 ml-1 truncate">{file.name}</span>
+                      </div>
+                    ) : file.type === 'table' ? (
+                      <div className="flex items-center justify-center p-2 bg-green-500/20 rounded-lg h-20">
+                        <Table className="w-4 h-4 text-green-400" />
+                        <span className="text-xs text-gray-400 ml-1 truncate">{file.name}</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-center p-2 bg-gray-500/20 rounded-lg h-20">
+                        <File className="w-4 h-4 text-gray-400" />
+                        <span className="text-xs text-gray-400 ml-1 truncate">{file.name}</span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          
           {/* Timestamp */}
-          <div className={`text-[11px] mt-2 ${msg.role === 'user' ? 'text-blue-100 text-right' : 'text-gray-400'}`}>
-            {msg.created_at ? new Date(msg.created_at).toLocaleString() : ''}
-          </div>
-          {/* Message actions below */}
-          <div className={`flex gap-3 mt-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'} text-xs`}>
-            <button onClick={handleCopy} className="p-1.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-1 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200" title={locale === 'zh' ? '复制' : 'Copy'}>
-              <Copy className="w-3 h-3" /> {locale === 'zh' ? '复制' : 'Copy'}
-            </button>
-            {msg.role === 'user' && msg.id && (
-              <>
-                <button onClick={() => handleEditMessage(msg.id, msg.content)} className="p-1.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 flex items-center gap-1 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200" title={locale === 'zh' ? '编辑' : 'Edit'}>
-                  <Edit2 className="w-3 h-3" /> {locale === 'zh' ? '编辑' : 'Edit'}
-                </button>
-                <button onClick={() => handleDeleteMessage(msg.id)} className="p-1.5 rounded-md hover:bg-red-500/10 flex items-center gap-1 text-gray-400 dark:text-gray-500 hover:text-red-500" title={locale === 'zh' ? '删除' : 'Delete'}>
-                  <Trash2 className="w-3 h-3" /> {locale === 'zh' ? '删除' : 'Delete'}
-                </button>
-              </>
-            )}
-          </div>
         </div>
       </div>
     );
@@ -766,6 +875,10 @@ const [isLoading, setIsLoading] = useState(false);
                 className="w-full bg-background border text-foreground text-sm rounded-lg px-2 md:px-3 py-1.5 md:py-2"
                 value={selectedProjectId || ''}
                 onChange={(e) => { 
+                  if (e.target.value === '__new__') {
+                    router.push('/dashboard?tab=projects&action=new');
+                    return;
+                  }
                   const p = projectList.find(x => x.id === e.target.value); 
                   if (p) { 
                     setSelectedProjectId(p.id); 
@@ -775,6 +888,7 @@ const [isLoading, setIsLoading] = useState(false);
                 }}
               >
                 {projectList.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                <option value="__new__">+ {locale === 'zh' ? '新建项目' : 'New Project'}</option>
               </select>
             </div>
 
@@ -1050,7 +1164,6 @@ const [isLoading, setIsLoading] = useState(false);
               </div>
               
 
-              
               {/* Textarea */}
               <textarea
                 ref={inputRef}
@@ -1084,7 +1197,7 @@ const [isLoading, setIsLoading] = useState(false);
               )}
               
               {/* Right action buttons */}
-              <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+              <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 z-50">
                 {/* Voice button */}
                 <button 
                   type="button" 
@@ -1108,8 +1221,9 @@ const [isLoading, setIsLoading] = useState(false);
                   </button>
                 ) : (
                   <button 
-                    type="submit" 
-                    disabled={(!input.trim() && attachments.length === 0) || !selectedProjectId}
+                    type="button" 
+                    onClick={() => { try { handleSendStream({ preventDefault: () => {} } as any); } catch(err) { console.error('Send error:', err); }}}
+                    disabled={false}
                     className={`p-2.5 rounded-full transition-all hover:scale-105 active:scale-95 ${
                       (input.trim() || attachments.length > 0) && selectedProjectId
                         ? 'bg-primary text-primary-foreground hover:bg-primary/90'
@@ -1121,36 +1235,21 @@ const [isLoading, setIsLoading] = useState(false);
                   </button>
                 )}
               </div>
-              
-              {/* Send button on the right */}
-              {isLoading ? (
-                <button 
-                  type="button"
-                  onClick={() => setIsLoading(false)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 p-2.5 bg-red-500 text-white rounded-xl hover:bg-red-600 transition-all hover:scale-105 active:scale-95"
-                  title={locale === 'zh' ? '停止' : 'Stop'}
-                >
-                  <Square className="w-4 h-4" />
-                </button>
-              ) : (
-                <button 
-                  type="submit" 
-                  disabled={(!input.trim() && attachments.length === 0) || !selectedProjectId}
-                  className={`absolute right-3 top-1/2 -translate-y-1/2 p-2.5 rounded-xl transition-all hover:scale-105 active:scale-95 ${
-                    (input.trim() || attachments.length > 0) && selectedProjectId
-                      ? 'bg-primary text-primary-foreground hover:bg-primary/90'
-                      : 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'
-                  }`}
-                  title={locale === 'zh' ? '发送' : 'Send'}
-                >
-                  <Send className="w-4 h-4" />
-                </button>
-              )}
             </div>
           </div>
           <input type="file" ref={fileInputRef} onChange={handleFileSelect} multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt" className="hidden" />
         </div>
       </div>
+      
+      {/* Lightbox for image gallery */}
+      <Lightbox
+        isOpen={lightboxOpen}
+        images={lightboxImages}
+        currentIndex={lightboxIndex}
+        onClose={() => setLightboxOpen(false)}
+        onPrev={() => setLightboxIndex(prev => Math.max(0, prev - 1))}
+        onNext={() => setLightboxIndex(prev => Math.min(lightboxImages.length - 1, prev + 1))}
+      />
     </div>
   );
 }

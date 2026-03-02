@@ -102,29 +102,29 @@ class WorkflowMatcher:
         # 预处理: 收集有embedding的模板
         templates_with_embedding = {t.id: t.embedding for t in templates if t.embedding}
         
+        # 预计算查询向量 (避免循环中重复调用)
+        query_vec = None
+        if templates_with_embedding:
+            query_text = f"{intent.analysis_type} {' '.join(intent.keywords)}"
+            query_vec = self.get_embedding(query_text)
+        
         for template in templates:
             base_score, reason = self._calculate_match_score(intent, template)
             
-            # 向量相似度加分
+            # 向量相似度加分 (使用预计算的向量)
             vector_boost = 0.0
-            if template.id in templates_with_embedding:
-                query_text = f"{intent.analysis_type} {' '.join(intent.keywords)}"
+            if query_vec and template.id in templates_with_embedding:
                 vec = templates_with_embedding[template.id]
-                sim = self._cosine_similarity(query_text, vec) if vec else 0.0
-                if sim > 0.5:
-                    vector_boost = min(0.3, (sim - 0.5) * 0.6)
-                    reason = f"{reason} | 向量:{sim:.2f}" if reason else f"向量相似度:{sim:.2f}"
+                if vec:
+                    sim = self._cosine_similarity_with_vec(query_vec, vec)
+                    if sim > 0.5:
+                        vector_boost = min(0.3, (sim - 0.5) * 0.6)
+                        reason = f"{reason} | 向量:{sim:.2f}" if reason else f"向量相似度:{sim:.2f}"
             
             total_score = base_score + vector_boost
             
             if total_score > 0.3:
                 scored_matches.append((template, total_score, reason))
-        
-        for template in templates:
-            score, reason = self._calculate_match_score(intent, template)
-            
-            if score > 0.3:
-                scored_matches.append((template, score, reason))
         
         scored_matches.sort(key=lambda x: x[1], reverse=True)
         
@@ -410,7 +410,21 @@ class WorkflowMatcher:
         except Exception as e:
             print(f"⚠️ Vector similarity error: {e}", flush=True)
             return 0.0
-
+    
+    def _cosine_similarity_with_vec(self, vec1: List[float], vec2: List[float]) -> float:
+        """计算两个预计算向量之间的余弦相似度"""
+        if not vec1 or not vec2:
+            return 0.0
+        try:
+            dot = sum(a * b for a, b in zip(vec1, vec2))
+            norm1 = sum(a * a for a in vec1) ** 0.5
+            norm2 = sum(b * b for b in vec2) ** 0.5
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            return dot / (norm1 * norm2)
+        except Exception as e:
+            print(f"⚠️ Vector similarity error: {e}", flush=True)
+            return 0.0
 workflow_matcher = WorkflowMatcher()
 
 workflow_matcher = WorkflowMatcher()

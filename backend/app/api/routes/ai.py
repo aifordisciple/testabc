@@ -143,6 +143,26 @@ def execute_plan(project_id: uuid.UUID, payload: ExecutePlanRequest, session: Se
         
         # Create message with task detail link
         task_link = f"/dashboard/task/{analysis.id}"
+        
+        # Save to ConversationMessage (used by frontend)
+        if payload.conversation_id:
+            try:
+                conv_uuid = uuid.UUID(payload.conversation_id)
+                conv_msg = ConversationMessage(
+                    conversation_id=conv_uuid,
+                    role="assistant",
+                    content=f"🚀 **Tool Execution Started!**\n\n"
+                            f"**Tool:** {template.name}\n"
+                            f"**Match Score:** {tool['match_score']:.0%}\n\n"
+                            f"Task ID: `{str(analysis.id)[:8]}`\n\n"
+                            f"[📊 View Task Details](/dashboard/task/{analysis.id})\n\n"
+                            f"I will notify you right here when it's done!"
+                )
+                session.add(conv_msg)
+            except:
+                pass
+        
+        # Also save to CopilotMessage for backward compatibility
         sys_msg = CopilotMessage(
             project_id=project_id, 
             session_id=payload.session_id, 
@@ -178,6 +198,25 @@ def execute_plan(project_id: uuid.UUID, payload: ExecutePlanRequest, session: Se
         
         # Create message with task detail link
         task_link = f"/dashboard/task/{analysis.id}"
+        
+        # Save to ConversationMessage (used by frontend)
+        if payload.conversation_id:
+            try:
+                conv_uuid = uuid.UUID(payload.conversation_id)
+                conv_msg = ConversationMessage(
+                    conversation_id=conv_uuid,
+                    role="assistant",
+                    content=f"🚀 **Tool Execution Started!**\n\n"
+                            f"**Tool:** {template.name}\n\n"
+                            f"Task ID: `{str(analysis.id)[:8]}`\n\n"
+                            f"[📊 View Task Details](/dashboard/task/{analysis.id})\n\n"
+                            f"I will notify you right here when it's done!"
+                )
+                session.add(conv_msg)
+            except:
+                pass
+        
+        # Also save to CopilotMessage for backward compatibility
         sys_msg = CopilotMessage(
             project_id=project_id, 
             session_id=payload.session_id, 
@@ -227,16 +266,32 @@ def execute_plan(project_id: uuid.UUID, payload: ExecutePlanRequest, session: Se
 
         if method == "workflow":
             from app.worker import run_ai_workflow_task
-            run_ai_workflow_task.delay(str(analysis.id), payload.session_id)
+            run_ai_workflow_task.delay(str(analysis.id), payload.session_id, payload.conversation_id)
         elif method == "sandbox":
             from app.worker import run_sandbox_task
-            run_sandbox_task.delay(str(analysis.id), str(project_id), plan.get("custom_code", ""), payload.session_id)
-
+            run_sandbox_task.delay(str(analysis.id), str(project_id), plan.get("custom_code", ""), payload.session_id, payload.conversation_id)
+        
+        task_link = f"/dashboard/task/{analysis.id}"
+        
+        # Save to ConversationMessage (used by frontend)
+        if payload.conversation_id:
+            try:
+                conv_uuid = uuid.UUID(payload.conversation_id)
+                conv_msg = ConversationMessage(
+                    conversation_id=conv_uuid,
+                    role="assistant",
+                    content=f"🚀 **Task Started!**\n\nTask ID: `{str(analysis.id)[:8]}`\n\n[📊 View Task Details]({task_link})\n\nI will notify you right here when it's done!"
+                )
+                session.add(conv_msg)
+            except:
+                pass
+        
+        # Also save to CopilotMessage for backward compatibility
         sys_msg = CopilotMessage(project_id=project_id, session_id=payload.session_id, role="assistant", content=f"🚀 **Task Started!** (Task ID: `{str(analysis.id)[:8]}`) \n\nI have submitted the task to the engine. **I will notify you right here when it's done!**")
         session.add(sys_msg)
         session.commit()
-
-        return {"status": "success", "analysis_id": str(analysis.id)}
+        
+        return {"status": "success", "analysis_id": str(analysis.id), "task_link": task_link}
 
     elif plan_type == "multi":
         steps = plan.get("steps", [])

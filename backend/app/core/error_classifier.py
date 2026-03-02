@@ -239,7 +239,9 @@ class ErrorClassifier:
 
     def _extract_file_paths(self, text: str) -> List[str]:
         file_pattern = r"/?[\w/\-\_\.]+\.(py|csv|tsv|fastq|bam|vcf|bed|fa|fq)(\.gz)?"
-        matches = re.findall(file_pattern, text, re.IGNORECASE)
+        # Use finditer to get full matches, avoiding tuple issue with groups
+        matches = [m.group(0) for m in re.finditer(file_pattern, text, re.IGNORECASE)]
+        return list(dict.fromkeys(matches))[:5]
         return list(set(matches))[:5]
 
     def format_error_message(self, classified: ClassifiedError, available_files: List[str] = None) -> str:

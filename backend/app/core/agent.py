@@ -13,6 +13,19 @@ HIGH_CONFIDENCE_THRESHOLD = 0.75
 MEDIUM_CONFIDENCE_THRESHOLD = 0.50
 MAX_TOOL_OPTIONS = 3
 
+# 快速分析关键词 - 用于跳过意图解析
+ANALYSIS_KEYWORDS = [
+    "分析", "绘制", "计算", "统计", "处理", "运行", "执行",
+    "画图", "图表", "bar图", "折线图", "散点图", "热图", "火山图",
+    "differential", "expression", "qc", "quality", "align", "mapping",
+    "analyze", "plot", "chart", "run", "execute", "calculate",
+    "差异", "表达", "质控", "比对", "聚类", "降维", "pca", "tsne"
+]
+
+def _is_likely_analysis_request(message: str) -> bool:
+    """快速检测是否可能是分析请求（跳过LLM意图解析）"""
+    msg_lower = message.lower()
+    return any(kw in msg_lower for kw in ANALYSIS_KEYWORDS)
 def get_llm():
     """获取 LangChain ChatOpenAI 客户端 (向后兼容函数)"""
     from app.core.llm import get_llm_client
@@ -63,6 +76,8 @@ CRITICAL RULES YOU MUST FOLLOW:
    - Example: df.to_csv('/workspace/output.csv') ✓  NOT df.to_csv('/data/output.csv') ✗
 6. MULTI-STEP TASKS: For complex tasks requiring multiple steps, use `propose_multi_step_plan`.
 7. SIMPLE TASKS: For single-step tasks, use `recommend_existing_tool` (if tools matched) or `propose_analysis_plan` (if no tools matched).
+8. VISUALIZATION: For plotting and visualization tasks, prefer R with ggplot2 when the user asks for charts, plots, or visualizations. R is better suited for statistical graphics.
+9. R CODE PATTERN: When generating R code for the sandbox, use R syntax: `<-` for assignment (not `=`), `library(pkg)` to load packages, and save plots to `/workspace/` directory using e.g., `ggsave("/workspace/plot.png", plot)`.
 """)
 
 def _format_messages(system_prompt: SystemMessage, history: List[Dict[str, Any]]) -> List:
@@ -195,7 +210,19 @@ def run_copilot_planner_with_matching(
     
     print(f"[Agent] 用户消息: {last_user_msg[:100]}...", flush=True)
     
-    intent = intent_parser.parse(last_user_msg)
+    # 快速路径: 如果消息明显是分析请求，跳过LLM意图解析
+    if _is_likely_analysis_request(last_user_msg):
+        print(f"⚡ [Agent] 快速路径: 检测到分析关键词，跳过意图解析", flush=True)
+        from app.core.intent_parser import ParsedIntent
+        intent = ParsedIntent(
+            intent_type="analysis",
+            analysis_type="Custom Analysis",
+            keywords=last_user_msg.split()[:5],
+            confidence=0.9,
+            raw_description=last_user_msg
+        )
+    else:
+        intent = intent_parser.parse(last_user_msg)
     print(f"[Agent] 意图类型: {intent.intent_type}", flush=True)
     
     if intent.intent_type != "analysis":
@@ -211,6 +238,27 @@ def run_copilot_planner_with_matching(
     
     best_match = matched_tools[0]
     print(f"[Agent] 最佳匹配: {best_match.template_name} (score: {best_match.match_score:.2f})", flush=True)
+    
+    # 超高置信度快速路径: 直接返回推荐，跳过第二次LLM调用
+    if best_match.match_score >= 0.85:
+        print(f"⚡ [Agent] 超高置信度快速路径: {best_match.template_name} ({best_match.match_score:.0%})", flush=True)
+        return {
+            "reply": f"I found a highly matching tool for your request: **{best_match.template_name}**. Please review and confirm.",
+            "plan_data": json.dumps({
+                "type": "tool_recommendation",
+                "matched_tools": [{
+                    "tool_id": str(best_match.template_id),
+                    "tool_name": best_match.template_name,
+                    "match_score": best_match.match_score,
+                    "match_reason": best_match.match_reason,
+                    "workflow_type": best_match.workflow_type,
+                    "description": best_match.description,
+                    "params_schema": best_match.params_schema,
+                    "inferred_params": best_match.inferred_params
+                }]
+            }),
+            "plan_type": "tool_recommendation"
+        }
     
     if best_match.match_score >= HIGH_CONFIDENCE_THRESHOLD:
         matched_tools_info = _format_matched_tools_for_prompt([best_match])

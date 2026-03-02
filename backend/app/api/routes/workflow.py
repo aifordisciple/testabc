@@ -308,6 +308,106 @@ def get_analysis_status(
         "workflow": analysis.workflow
     }
 
+@router.get("/analyses/{analysis_id}/detail")
+def get_analysis_detail(
+    analysis_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    analysis = session.get(Analysis, analysis_id)
+    if not analysis:
+        raise HTTPException(404, "Analysis not found")
+    project = session.get(Project, analysis.project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(403, "Permission denied")
+    sample_sheet_name = None
+    if analysis.sample_sheet_id:
+        sheet = session.get(SampleSheet, analysis.sample_sheet_id)
+        if sheet:
+            sample_sheet_name = sheet.name
+    return {
+        "id": str(analysis.id),
+        "workflow": analysis.workflow,
+        "params_json": analysis.params_json,
+        "status": analysis.status,
+        "sample_sheet_id": str(analysis.sample_sheet_id) if analysis.sample_sheet_id else None,
+        "project_id": str(analysis.project_id),
+        "work_dir": analysis.work_dir,
+        "out_dir": analysis.out_dir,
+        "start_time": analysis.start_time.isoformat() if analysis.start_time else None,
+        "end_time": analysis.end_time.isoformat() if analysis.end_time else None,
+        "pid": analysis.pid,
+        "project_name": project.name,
+        "project_description": project.description,
+        "sample_sheet_name": sample_sheet_name
+    }
+
+@router.get("/analyses/{analysis_id}/files")
+def get_analysis_files(
+    analysis_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    analysis = session.get(Analysis, analysis_id)
+    if not analysis:
+        raise HTTPException(404, "Analysis not found")
+    project = session.get(Project, analysis.project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(403, "Permission denied")
+    base_dir = analysis.out_dir if analysis.out_dir else os.path.join(workflow_service.base_work_dir, str(analysis.id), "results")
+    files = []
+    if os.path.exists(base_dir):
+        for root, dirs, filenames in os.walk(base_dir):
+            for fname in filenames:
+                fpath = os.path.join(root, fname)
+                rel_path = os.path.relpath(fpath, base_dir)
+                files.append({
+                    "name": rel_path,
+                    "path": fpath,
+                    "size": os.path.getsize(fpath),
+                    "url": f"/api/v1/workflow/analyses/{analysis_id}/download?file={rel_path}"
+                })
+    return files
+
+
+@router.get("/analyses/{analysis_id}/download")
+def download_analysis_file(
+    analysis_id: uuid.UUID,
+    file: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Download a single file from analysis results"""
+    analysis = session.get(Analysis, analysis_id)
+    if not analysis:
+        raise HTTPException(404, "Analysis not found")
+    project = session.get(Project, analysis.project_id)
+    if not project or project.owner_id != current_user.id:
+        raise HTTPException(403, "Permission denied")
+    
+    base_dir = analysis.out_dir if analysis.out_dir else os.path.join(workflow_service.base_work_dir, str(analysis.id), "results")
+    
+    # Security: prevent path traversal
+    file_path = os.path.normpath(os.path.join(base_dir, file))
+    if not file_path.startswith(os.path.normpath(base_dir)):
+        raise HTTPException(403, "Access denied")
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(404, "File not found")
+    
+    # Determine media type
+    media_type, _ = mimetypes.guess_type(file_path)
+    if media_type is None:
+        media_type = "application/octet-stream"
+    
+    filename = os.path.basename(file_path)
+    return FileResponse(
+        path=file_path,
+        media_type=media_type,
+        filename=filename
+    )
+
+
 @router.websocket("/analyses/{analysis_id}/ws/log")
 async def websocket_analysis_log(
     websocket: WebSocket,

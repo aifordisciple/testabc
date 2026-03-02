@@ -3,10 +3,12 @@ import json
 import uuid
 import subprocess
 import base64
+import traceback
 from datetime import datetime
 from celery import Celery
+from celery.exceptions import MaxRetriesExceededError
 from celery.schedules import crontab
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.core.config import settings
 from app.core.db import engine
@@ -15,6 +17,7 @@ from app.services.geo_service import geo_service
 from app.services.knowledge_service import knowledge_service
 from app.services.sandbox import sandbox_service
 from app.models.user import Analysis, CopilotMessage, Project, File, ProjectFileLink, TaskChain
+from app.models.conversation import ConversationMessage
 
 celery_app = Celery(
     "worker",
@@ -70,7 +73,7 @@ def sync_recent_geo_datasets(batch_size=15):
     return success_count
 
 @celery_app.task(name="run_ai_workflow_task")
-def run_ai_workflow_task(analysis_id: str, session_id: str = "default"):
+def run_ai_workflow_task(analysis_id: str, session_id: str = "default", conversation_id: str = None):
     print(f"🤖 [AI Celery] Starting unified workflow task {analysis_id}")
     try:
         with Session(engine) as session:
@@ -92,10 +95,65 @@ def run_ai_workflow_task(analysis_id: str, session_id: str = "default"):
             else:
                 md_msg += "Execution failed. Click the link above to view logs and error details."
 
+            # Save to ConversationMessage (used by frontend)
+            if conversation_id:
+                try:
+                    conv_uuid = uuid.UUID(conversation_id)
+                    conv_msg = ConversationMessage(
+                        conversation_id=conv_uuid,
+                        role="assistant",
+                        content=md_msg
+                    )
+                    session.add(conv_msg)
+                    print(f"🤖 [AI Celery] Saved completion message to ConversationMessage")
+                except Exception as e:
+                    print(f"❌ [AI Celery] Failed to save to ConversationMessage: {e}")
+            
+            # Also save to CopilotMessage for backward compatibility
             msg = CopilotMessage(project_id=project_id, session_id=session_id, role="assistant", content=md_msg)
             session.add(msg)
             session.commit()
     except Exception as e:
+        error_msg = f"❌ [AI Celery] System error: {str(e)}"
+        print(error_msg)
+        print("Traceback:", traceback.format_exc())
+        
+        # Try to update task status to failed and notify user
+        try:
+            with Session(engine) as session:
+                analysis_uuid = uuid.UUID(analysis_id)
+                analysis = session.get(Analysis, analysis_uuid)
+                if analysis:
+                    analysis.status = "failed"
+                    session.add(analysis)
+                    session.commit()
+                    project_id = analysis.project_id
+                    
+                    # Send error message to chat
+                    error_detail = str(e)[:500]
+                    md_msg = f"### ❌ Task Failed\n\n"
+                    md_msg += f"**Task ID:** `{analysis_id[:8]}`\n\n"
+                    md_msg += f"**Error:** {error_detail}\n\n"
+                    md_msg += f"[📊 View Task Logs](/dashboard/task/{analysis_id})\n\n"
+                    md_msg += "The task has failed. You can check the logs for more details, or try again with different parameters."
+                    
+                    if conversation_id:
+                        try:
+                            conv_uuid = uuid.UUID(conversation_id)
+                            conv_msg = ConversationMessage(
+                                conversation_id=conv_uuid,
+                                role="assistant",
+                                content=md_msg
+                            )
+                            session.add(conv_msg)
+                        except Exception as msg_e:
+                            print(f"❌ [AI Celery] Failed to save error to ConversationMessage: {msg_e}")
+                    
+                    msg = CopilotMessage(project_id=project_id, session_id=session_id, role="assistant", content=md_msg)
+                    session.add(msg)
+                    session.commit()
+        except Exception as update_e:
+            print(f"❌ [AI Celery] Failed to update error status: {update_e}")
         print(f"❌ [AI Celery] System error: {e}")
 
 SETUP_CODE = """import os
@@ -111,11 +169,17 @@ WORK_DIR = '/workspace'
 os.chdir(WORK_DIR)
 """
 
-def _save_files_to_project(db: Session, project_id: str, files: list, res: dict):
-    """保存生成的文件到项目目录并记录到数据库"""
+def _save_files_to_project(db: Session, project_id: str, files: list, res: dict, analysis_id: str = None):
+    """保存生成的文件到项目目录和 analysis results 目录"""
     upload_root = os.getenv("UPLOAD_ROOT", "/data/uploads")
     save_dir = os.path.join(upload_root, str(project_id))
     os.makedirs(save_dir, exist_ok=True)
+    
+    # Also save to analysis results directory for task detail page
+    results_dir = None
+    if analysis_id:
+        results_dir = os.path.join(workflow_service.base_work_dir, str(analysis_id), "results")
+        os.makedirs(results_dir, exist_ok=True)
     
     project = db.get(Project, uuid.UUID(project_id))
     if not project:
@@ -132,12 +196,18 @@ def _save_files_to_project(db: Session, project_id: str, files: list, res: dict)
                 os.makedirs(fdir, exist_ok=True)
             
             try:
-                file_type = file_info.get("type", "text")
+                file_type = file_info.get("type", "")
                 
                 if file_type == "image" and file_info.get("data"):
                     b64_str = file_info['data'].split(",")[1]
                     with open(fpath, "wb") as f:
                         f.write(base64.b64decode(b64_str))
+                    # Also save to results dir
+                    if results_dir:
+                        rpath = os.path.join(results_dir, fname)
+                        os.makedirs(os.path.dirname(rpath) if os.path.dirname(rpath) else results_dir, exist_ok=True)
+                        with open(rpath, "wb") as f:
+                            f.write(base64.b64decode(b64_str))
                     saved_files.append({"type": "image", "name": fname, "data": file_info['data']})
                     print(f"📊 [Worker] Saved image: {fname}", flush=True)
                     
@@ -145,12 +215,24 @@ def _save_files_to_project(db: Session, project_id: str, files: list, res: dict)
                     b64_str = file_info['data'].split(",")[1]
                     with open(fpath, "wb") as f:
                         f.write(base64.b64decode(b64_str))
+                    # Also save to results dir
+                    if results_dir:
+                        rpath = os.path.join(results_dir, fname)
+                        os.makedirs(os.path.dirname(rpath) if os.path.dirname(rpath) else results_dir, exist_ok=True)
+                        with open(rpath, "wb") as f:
+                            f.write(base64.b64decode(b64_str))
                     saved_files.append({"type": "pdf", "name": fname, "data": file_info['data']})
                     print(f"📄 [Worker] Saved PDF: {fname}", flush=True)
                     
                 elif file_type == "text" and file_info.get("content"):
                     with open(fpath, "w", encoding="utf-8") as f:
                         f.write(file_info['content'])
+                    # Also save to results dir
+                    if results_dir:
+                        rpath = os.path.join(results_dir, fname)
+                        os.makedirs(os.path.dirname(rpath) if os.path.dirname(rpath) else results_dir, exist_ok=True)
+                        with open(rpath, "w", encoding="utf-8") as f:
+                            f.write(file_info['content'])
                     
                     if fname.endswith(('.csv', '.tsv')):
                         preview_lines = file_info['content'].split('\n')[:20]
@@ -164,6 +246,12 @@ def _save_files_to_project(db: Session, project_id: str, files: list, res: dict)
                     b64_str = file_info['data'].split(",")[1]
                     with open(fpath, "wb") as f:
                         f.write(base64.b64decode(b64_str))
+                    # Also save to results dir
+                    if results_dir:
+                        rpath = os.path.join(results_dir, fname)
+                        os.makedirs(os.path.dirname(rpath) if os.path.dirname(rpath) else results_dir, exist_ok=True)
+                        with open(rpath, "wb") as f:
+                            f.write(base64.b64decode(b64_str))
                     print(f"📦 [Worker] Saved binary: {fname}", flush=True)
                 
                 if os.path.exists(fpath):
@@ -175,6 +263,15 @@ def _save_files_to_project(db: Session, project_id: str, files: list, res: dict)
                         content_type = "application/pdf"
                     elif file_type == "text":
                         content_type = "text/plain"
+                    
+                    # Check if file already exists
+                    s3_key = f"{project_id}/{fname}"
+                    existing_file = db.exec(
+                        select(File).where(File.s3_key == s3_key)
+                    ).first()
+                    if existing_file:
+                        print(f"⚠️ [Worker] File already exists, skipping: {fname}", flush=True)
+                        continue
                     
                     db_file = File(
                         filename=fname, size=fsize,
@@ -193,7 +290,6 @@ def _save_files_to_project(db: Session, project_id: str, files: list, res: dict)
                 print(f"❌ [Worker] Failed to save file {fname}: {e}", flush=True)
     
     return saved_files
-
 def _send_progress_message(db: Session, project_id: str, session_id: str, content: str):
     """发送进度消息到聊天"""
     msg = CopilotMessage(
@@ -206,7 +302,7 @@ def _send_progress_message(db: Session, project_id: str, session_id: str, conten
     db.commit()
 
 @celery_app.task(name="run_sandbox_task")
-def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, session_id: str = "default"):
+def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, session_id: str = "default", conversation_id: str = None):
     print(f"🚀 [Sandbox Task] Starting custom analysis {analysis_id}")
     
     try:
@@ -224,7 +320,8 @@ def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, sessio
         log_file = os.path.join(work_dir, "analysis.log")
         with open(log_file, "w", encoding="utf-8") as f:
             f.write("🚀 Starting AI Custom Sandbox Execution...\n")
-        f.write("=" * 50 + "\nExecuting Code:\n" + custom_code + "\n" + "=" * 50 + "\n\n")
+            f.write("=" * 50 + "\nExecuting Code:\n" + custom_code + "\n" + "=" * 50 + "\n\n")
+
 
         # Retry logic for sandbox execution
         retry_count = 0
@@ -232,7 +329,13 @@ def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, sessio
         success = False
         current_code = custom_code
         
-        while retry_count < max_retries and not success:
+        # Execute sandbox with error handling
+        try:
+            res = sandbox_service.execute_python(project_id, SETUP_CODE + "\n" + current_code)
+        except Exception as e:
+            print(f"❌ [Sandbox Task] Error executing sandbox: {str(e)}", flush=True)
+            print(f"Traceback: {traceback.format_exc()}", flush=True)
+            res = {'success': False, 'stdout': '', 'stderr': str(e), 'files': [], 'error_classified': None}
             res = sandbox_service.execute_python(project_id, SETUP_CODE + "\n" + current_code)
             success = res['success']
             
@@ -264,7 +367,14 @@ def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, sessio
         if retry_count > 0:
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"\n🔄 Retried {retry_count} time(s)\n")
-            
+        
+        # Final execution with error handling
+        try:
+            res = sandbox_service.execute_python(project_id, SETUP_CODE + "\n" + custom_code)
+        except Exception as e:
+            print(f"❌ [Sandbox Task] Error in final execution: {str(e)}", flush=True)
+            print(f"Traceback: {traceback.format_exc()}", flush=True)
+            res = {'success': False, 'stdout': '', 'stderr': str(e), 'files': [], 'error_classified': None}
         res = sandbox_service.execute_python(project_id, SETUP_CODE + "\n" + custom_code)
 
         with open(log_file, "a", encoding="utf-8") as f:
@@ -293,11 +403,16 @@ def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, sessio
             if res.get('files') and project:
                 md_msg += "**Generated Results:**\n\n"
                 try:
-                    attachments = _save_files_to_project(db, project_id, res['files'], res)
-                    # Add result previews
+                    attachments = _save_files_to_project(db, project_id, res['files'], res, analysis_id)
+                    # Add result previews with full base64 data for images
                     for att in attachments:
                         if att.get('type') == 'image':
-                            md_msg += f"![{att['name']}]({att.get('data', '')[:100]}...)\n\n"
+                            # Use full base64 data for image display
+                            img_data = att.get('data', '')
+                            if img_data:
+                                md_msg += f"![{att['name']}]({img_data})\n\n"
+                            else:
+                                md_msg += f"📷 **Image: {att['name']}**\n\n"
                         elif att.get('type') == 'table':
                             md_msg += f"**Table: {att['name']}**\n```\n{att.get('preview', '')[:500]}\n```\n\n"
                     md_msg += "\n*(Files are stored in your **Files** tab)*\n\n"
@@ -328,6 +443,22 @@ def run_sandbox_task(analysis_id: str, project_id: str, custom_code: str, sessio
                 attachments=json.dumps(attachments) if attachments else None
             )
             db.add(msg)
+            
+            # Save to ConversationMessage (used by frontend)
+            if conversation_id:
+                try:
+                    conv_uuid = uuid.UUID(conversation_id)
+                    conv_msg = ConversationMessage(
+                        conversation_id=conv_uuid,
+                        role="assistant",
+                        content=md_msg,
+                        files=json.dumps(attachments) if attachments else None
+                    )
+                    db.add(conv_msg)
+                    print(f"✅ [Sandbox Task] Saved completion message to ConversationMessage", flush=True)
+                except Exception as e:
+                    print(f"❌ [Sandbox Task] Failed to save to ConversationMessage: {e}", flush=True)
+            
             db.commit()
             print(f"✅ [Sandbox Task] Message saved to chat, task completed", flush=True)
             
@@ -454,7 +585,7 @@ def run_task_chain(chain_id: str):
                     db.commit()
                     
                     if res.get('files'):
-                        saved = _save_files_to_project(db, project_id, res['files'], res)
+                        saved = _save_files_to_project(db, project_id, res['files'], res, str(chain_id))
                         all_attachments.extend(saved)
                     
                     _send_progress_message(
@@ -492,9 +623,13 @@ def run_task_chain(chain_id: str):
                 final_msg += "**Generated Files:**\n"
                 for att in all_attachments:
                     final_msg += f"- 📄 `{att['name']}`\n"
-                    # Add preview for images and tables
+                    # Add preview for images and tables with full base64 data
                     if att.get('type') == 'image':
-                        final_msg += f"  ![{att['name']}]({att.get('data', '')[:100]}...)\n"
+                        img_data = att.get('data', '')
+                        if img_data:
+                            final_msg += f"  ![{att['name']}]({img_data})\n"
+                        else:
+                            final_msg += f"  📷 Image: {att['name']}\n"
                     elif att.get('type') == 'table':
                         final_msg += f"  ```\n  {att.get('preview', '')[:300]}\n  ```\n"
                 final_msg += "\n*(Check the **Files** tab for all generated files)*\n"

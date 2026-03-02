@@ -6,7 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 import { 
   ArrowLeft, Clock, CheckCircle2, XCircle, AlertCircle, RefreshCw,
   Terminal, Download, FileText, FolderOpen, Play, Square, Trash2,
-  Copy, Check, ExternalLink, Package
+  Copy, Check, ExternalLink, Package, Code
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -21,6 +21,7 @@ interface AnalysisDetail {
   id: string;
   workflow: string;
   params_json: string;
+  strategy?: string;
   status: string;
   sample_sheet_id?: string;
   project_id: string;
@@ -72,6 +73,8 @@ const translations = {
     confirmDelete: '确定要删除此任务吗？',
     copyLog: '复制日志',
     copied: '已复制',
+    code: '代码',
+    strategy: '分析策略',
   },
   en: {
     back: 'Back',
@@ -103,6 +106,8 @@ const translations = {
     confirmDelete: 'Are you sure you want to delete this task?',
     copyLog: 'Copy Log',
     copied: 'Copied',
+    code: 'Code',
+    strategy: 'Strategy',
   }
 };
 
@@ -355,6 +360,8 @@ export default function TaskDetailPage() {
             <TabsTrigger value="logs">{t.logs}</TabsTrigger>
             <TabsTrigger value="files">{t.files}</TabsTrigger>
             <TabsTrigger value="parameters">{t.parameters}</TabsTrigger>
+            <TabsTrigger value="strategy">{t.strategy}</TabsTrigger>
+            <TabsTrigger value="code">{t.code}</TabsTrigger>
           </TabsList>
 
           <ScrollArea className="flex-1">
@@ -469,6 +476,30 @@ export default function TaskDetailPage() {
                   <pre className="text-xs font-mono whitespace-pre-wrap overflow-auto">
                     {JSON.stringify(JSON.parse(detail.params_json || '{}'), null, 2)}
                   </pre>
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="strategy" className="m-0">
+              <div className="p-4">
+                <h3 className="font-semibold mb-3">{t.strategy}</h3>
+                <div className="bg-card border rounded-lg p-4">
+                  {detail.strategy ? (
+                    <pre className="text-xs font-mono whitespace-pre-wrap overflow-auto">
+                      {detail.strategy}
+                    </pre>
+                  ) : (
+                    <p className="text-muted-foreground">-</p>
+                  )}
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="code" className="m-0">
+              <div className="p-4">
+                <h3 className="font-semibold mb-3">{t.code}</h3>
+                <div className="bg-card border rounded-lg p-4">
+                  <p className="text-muted-foreground">暂无执行代码 / No executed code available</p>
                 </div>
               </div>
             </TabsContent>

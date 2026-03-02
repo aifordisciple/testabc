@@ -35,7 +35,7 @@ class ConversationMessage(ConversationMessageBase, table=True):
     files: Optional[str] = Field(default=None, description="附件数据 (JSON)")
 
 class ConversationCreate(ConversationBase):
-    project_id: uuid.UUID
+    project_id: Optional[uuid.UUID] = None
 
 class ConversationPublic(ConversationBase):
     id: uuid.UUID
@@ -59,6 +59,6 @@ class MessagePublic(SQLModel):
     created_at: datetime
     response_mode: Optional[str] = None
     response_data: Optional[dict] = None
-    plan_data: Optional[dict] = None  # Alias for response_data for frontend compatibility
+    plan_data: Optional[str] = None  # Alias for response_data for frontend compatibility
     files: Optional[list] = None
     attachments: Optional[list] = None  # Alias for files for frontend compatibility

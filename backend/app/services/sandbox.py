@@ -79,6 +79,39 @@ class SandboxService:
             return True
         return False
 
+    @staticmethod
+    def _is_r_code(code: str) -> bool:
+        """
+        Detect if the code is R code based on common R patterns.
+        """
+        r_indicators = [
+            '<-',  # R assignment operator
+            'library(',  # R library call
+            'require(',  # R library call
+            'ggplot(',  # R ggplot2
+            'dplyr::',  # R dplyr
+            'tidyr::',  # R tidyr
+            'base::',  # R base package
+            'install.packages(',  # R package installation
+            'library\(',  # R library
+            'data.frame(',  # R data frame
+            'read.table(',  # R read table
+            'read.csv(',  # R read csv
+            'write.table(',  # R write table
+            'write.csv(',  # R write csv
+            'summary(',  # R summary (common in both but often R)
+            ' head(',  # R head function
+            ' str(',  # R str function
+            '#\'',  # R comment
+            'aes(',  # R ggplot aesthetics
+            'geom_',  # R ggplot geometry
+            'scale_',  # R ggplot scales
+        ]
+        code_lower = code.lower()
+        # Check for R-specific patterns
+        score = sum(1 for indicator in r_indicators if indicator in code_lower)
+        return score >= 1
+
     def execute_python(
         self, 
         project_id: str, 
@@ -100,7 +133,21 @@ class SandboxService:
                 shutil.copy(context_path, os.path.join(container_workspace_dir, CONTEXT_FILE))
                 print(f"📥 [Sandbox] Restored context from previous run", flush=True)
         
-        full_code = CONTEXT_RESTORE_CODE + "\n\n" + code
+        # Detect if code is R or Python
+        is_r_code = self._is_r_code(code)
+        
+        if is_r_code:
+            script_name = "script.R"
+            exec_cmd = ["Rscript"]
+            full_code = code  # R doesn't need context restore
+        else:
+            script_name = "script.py"
+            exec_cmd = ["python"]
+            full_code = CONTEXT_RESTORE_CODE + "\n\n" + code
+        
+        script_path = os.path.join(container_workspace_dir, script_name)
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(full_code)
         
         script_path = os.path.join(container_workspace_dir, "script.py")
         with open(script_path, "w", encoding="utf-8") as f:
@@ -119,8 +166,8 @@ class SandboxService:
             "-v", f"{host_workspace_dir}:/workspace:rw",
             "-w", "/workspace",
             self.sandbox_image,
-            "python", "script.py"
-        ]
+        ] + exec_cmd + [script_name]
+
         
         stdout, stderr = "", ""
         success = False
@@ -314,6 +361,22 @@ class SandboxService:
         
         result['retry_count'] = retry_count
         return result
+
+    def _get_file_list(self, project_id: str) -> list:
+        """获取项目文件列表"""
+        container_project_dir = os.path.join(self.upload_root, str(project_id))
+        
+        if not os.path.exists(container_project_dir):
+            return []
+    
+        files = []
+        for root, dirs, filenames in os.walk(container_project_dir):
+            for fname in filenames:
+                fpath = os.path.join(root, fname)
+                rel_path = os.path.relpath(fpath, container_project_dir)
+                files.append(rel_path)
+        
+        return files
 
     def _get_data_context(self, project_id: str) -> str:
         """获取项目数据上下文（文件列表等）"""

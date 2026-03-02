@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from sqlmodel import select, func
 from app.core.config import settings
 from app.core.db import init_db, get_session
-from app.api.routes import auth, files, workflow, admin, ai, knowledge, conversations
+from app.api.routes import auth, files, workflow, admin, ai, knowledge, conversations, tasks
 from app.api.routes import plugins as plugins_router
 from app.api.routes import orchestration as orchestration_router
 from app.api.routes import community as community_router
@@ -215,6 +215,7 @@ app.include_router(conversations.router, prefix=f"{settings.API_V1_STR}", tags=[
 app.include_router(plugins_router.router, prefix=f"{settings.API_V1_STR}/system", tags=["System"])
 app.include_router(orchestration_router.router, prefix=f"{settings.API_V1_STR}/ai/orchestration", tags=["Orchestration"])
 app.include_router(community_router.router, prefix=f"{settings.API_V1_STR}/community", tags=["Community"])
+#KB|app.include_router(tasks.router, prefix=f"{settings.API_V1_STR}/tasks", tags=["Tasks"])
 
 
 

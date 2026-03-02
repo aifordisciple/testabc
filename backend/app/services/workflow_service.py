@@ -2,7 +2,9 @@ import os
 import subprocess
 import csv
 import json
+import uuid
 from uuid import UUID
+import traceback
 from datetime import datetime
 from sqlmodel import Session, select
 from app.models.user import Analysis, Project, Sample, File, SampleFileLink, SampleSheet
@@ -288,6 +290,7 @@ class WorkflowService:
         except Exception as e:
             analysis.status = "error"
             write_log(f"💥 System Error: {str(e)}")
+            write_log(f"📜 Traceback: {traceback.format_exc()}")
             
         finally:
             analysis.end_time = datetime.utcnow()
